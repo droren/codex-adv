@@ -3,16 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import os
+from pathlib import Path
 import shlex
 
+from codex_adv.input import ChatInput
 from codex_adv.learning import LearningStore, MessageRecord, SessionRecord
 from codex_adv.router import Router, RoutedResponse
 from codex_adv.ui import TerminalUI
-
-try:
-    import readline  # type: ignore
-except ImportError:  # pragma: no cover
-    readline = None
 
 
 HELP_TEXT = """Commands:
@@ -20,6 +17,7 @@ HELP_TEXT = """Commands:
 /quit                Exit chat
 /exit                Exit chat
 /new [title]         Start a new session
+/debug [on|off]      Toggle execution debug output
 /switch <id-prefix>  Switch to another recent session
 /rename <title>      Rename the current session
 /session             Show current session id and title
@@ -35,6 +33,7 @@ HELP_TEXT = """Commands:
 class ChatState:
     session: SessionRecord
     last_response: RoutedResponse | None = None
+    debug_enabled: bool = False
 
 
 class InteractiveChat:
@@ -42,8 +41,7 @@ class InteractiveChat:
         self.router = router
         self.store = store
         self.ui = TerminalUI()
-        if readline is not None:
-            readline.parse_and_bind("tab: complete")
+        self.input = ChatInput(Path(".codex-adv/input-history.txt"))
 
     def start(self, resume_latest: bool = True) -> int:
         state = self._load_or_create_session(resume_latest=resume_latest)
@@ -51,7 +49,7 @@ class InteractiveChat:
 
         while True:
             try:
-                raw = self.ui.prompt().strip()
+                raw = self.input.prompt(self.ui.prompt()).strip()
             except EOFError:
                 print()
                 return 0
@@ -102,6 +100,16 @@ class InteractiveChat:
             return False
         if command == "/help":
             self.ui.print_help(HELP_TEXT)
+            return True
+        if command == "/debug":
+            if len(parts) == 1:
+                state.debug_enabled = not state.debug_enabled
+            elif parts[1].lower() in {"on", "off"}:
+                state.debug_enabled = parts[1].lower() == "on"
+            else:
+                self.ui.print_warning("Usage: /debug [on|off]")
+                return True
+            self.ui.print_info(f"debug: {'on' if state.debug_enabled else 'off'}")
             return True
         if command == "/session":
             self.ui.print_info(f"{state.session.id}  {state.session.title}")
@@ -199,12 +207,15 @@ class InteractiveChat:
             )
         )
         history = self.store.get_messages(state.session.id)
-        self.ui.print_assistant_header("routing...")
-        response = self.router.run(
-            prompt,
-            conversation=history[:-1],
-            stream_handler=self.ui.stream_chunk,
-        )
+        self.ui.print_assistant_header("working")
+        if state.debug_enabled:
+            self.ui.print_debug_header()
+        with self.ui.working(self._working_message(prompt, state)):
+            response = self.router.run(
+                prompt,
+                conversation=history[:-1],
+                stream_handler=self.ui.debug_chunk if state.debug_enabled else None,
+            )
         state.last_response = response
 
         response_timestamp = datetime.now(UTC).isoformat()
@@ -223,7 +234,7 @@ class InteractiveChat:
             )
         )
 
-        self.ui.end_stream()
+        self.ui.print_result(response.final_model, response.output)
         if not response.success:
             self.ui.print_warning(f"request ended with {response.failure_reason}")
 
@@ -255,3 +266,7 @@ class InteractiveChat:
             f"latency={response.latency_seconds:.2f}s"
         )
         self.ui.print_route(route_line, response.rewrite_strategy)
+
+    def _working_message(self, prompt: str, state: ChatState) -> str:
+        task = "local-first routing"
+        return f"{task} for session {state.session.id[:8]}..."

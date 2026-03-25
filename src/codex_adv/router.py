@@ -14,6 +14,7 @@ from codex_adv.rewriters import RewriteResult, rewrite_for_cloud, rewrite_for_lo
 @dataclass(slots=True)
 class RoutedResponse:
     output: str
+    raw_output: str
     classification: Classification
     initial_model: str
     final_model: str
@@ -101,6 +102,7 @@ class Router:
         combined_output = final_result.stdout.strip() or final_result.stderr.strip()
         return RoutedResponse(
             output=combined_output,
+            raw_output=final_result.raw_output,
             classification=classification,
             initial_model=initial_model,
             final_model=final_model,
@@ -125,9 +127,8 @@ class Router:
 
     def _choose_model(self, classification: Classification) -> str:
         task_type = classification.task_type
-        if classification.complexity_score <= self.config.routing.simple_complexity_threshold:
-            if task_type in self.config.routing.prefer_local_task_types:
-                return "local"
+        if task_type in self.config.routing.prefer_local_task_types:
+            return "local"
 
         historical_success = self.store.success_rate("local", task_type)
         if historical_success is not None:
@@ -137,7 +138,10 @@ class Router:
                 else "cloud"
             )
 
-        if task_type in self.config.routing.cloud_task_types:
+        if (
+            classification.complexity_score > self.config.routing.simple_complexity_threshold
+            and task_type in self.config.routing.cloud_task_types
+        ):
             return "cloud"
         return "local"
 

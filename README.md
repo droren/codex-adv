@@ -35,6 +35,7 @@ local   cloud
 
 - Interactive chat mode with persistent sessions
 - Live streaming output during interactive turns
+- Clean interactive result panels with muted working-state UI
 - Rule-based task classification
 - Local vs cloud routing
 - Separate local and cloud prompt rewriters
@@ -112,6 +113,7 @@ codex --profile cloud "Refactor this module and add tests"
 ```
 
 `codex-adv` does not replace Codex config. It routes into it and keeps interactive state in SQLite.
+By default, routing is local-first and only prefers cloud for clearly heavier tasks or after poor local outcomes.
 
 ## Config
 

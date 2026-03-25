@@ -8,7 +8,7 @@ path = ".codex-adv/memory.db"
 [routing]
 simple_complexity_threshold = 3
 prefer_local_task_types = ["explain", "single_file_edit", "small_fix", "test_help"]
-cloud_task_types = ["multi_file_edit", "architecture", "large_refactor", "unknown"]
+cloud_task_types = ["multi_file_edit", "architecture", "large_refactor"]
 min_local_success_rate = 0.7
 
 [fallback]
