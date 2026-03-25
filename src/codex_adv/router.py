@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, UTC
+from typing import Callable
+
+from codex_adv.classifier import Classification, classify_prompt
+from codex_adv.config import AppConfig
+from codex_adv.executor import ExecutionResult, run_codex, stream_codex
+from codex_adv.learning import LearningStore, RequestRecord
+from codex_adv.rewriters import RewriteResult, rewrite_for_cloud, rewrite_for_local
+
+
+@dataclass(slots=True)
+class RoutedResponse:
+    output: str
+    classification: Classification
+    initial_model: str
+    final_model: str
+    fallback_used: bool
+    success: bool
+    failure_reason: str
+    rewritten_prompt: str
+    rewrite_strategy: str
+    latency_seconds: float
+
+
+class Router:
+    def __init__(self, config: AppConfig, store: LearningStore) -> None:
+        self.config = config
+        self.store = store
+
+    def run(
+        self,
+        prompt: str,
+        conversation: list[object] | None = None,
+        stream_handler: Callable[[str], None] | None = None,
+    ) -> RoutedResponse:
+        classification = classify_prompt(prompt)
+        initial_model = self._choose_model(classification)
+        routed_prompt = self._with_conversation_context(prompt, conversation)
+
+        if initial_model == "local":
+            rewrite = rewrite_for_local(
+                routed_prompt, classification, self.config.rewrites.local.style
+            )
+            first_result = self._execute(
+                rewrite.rewritten_prompt,
+                self.config.profiles.local,
+                stream_handler=stream_handler,
+            )
+        else:
+            rewrite = rewrite_for_cloud(
+                routed_prompt, classification, self.config.rewrites.cloud.style
+            )
+            first_result = self._execute(
+                rewrite.rewritten_prompt,
+                self.config.profiles.cloud,
+                stream_handler=stream_handler,
+            )
+
+        first_success, first_failure_reason = self._assess(first_result)
+        final_result = first_result
+        final_model = initial_model
+        fallback_used = False
+        final_rewrite = rewrite
+
+        if (
+            not first_success
+            and initial_model == "local"
+            and self.config.fallback.enabled
+            and self.config.fallback.max_attempts > 1
+        ):
+            fallback_used = True
+            final_model = "cloud"
+            if stream_handler is not None:
+                stream_handler(
+                    "\n[router] local response looked weak, retrying with cloud...\n\n"
+                )
+            final_rewrite = rewrite_for_cloud(
+                routed_prompt, classification, self.config.rewrites.cloud.style
+            )
+            final_result = self._execute(
+                final_rewrite.rewritten_prompt,
+                self.config.profiles.cloud,
+                stream_handler=stream_handler,
+            )
+
+        success, failure_reason = self._assess(final_result)
+        self._log(
+            prompt=prompt,
+            classification=classification,
+            model=final_model,
+            rewrite=final_rewrite,
+            fallback_used=fallback_used,
+            success=success,
+            failure_reason=failure_reason if success is False else first_failure_reason,
+            latency=final_result.latency_seconds,
+        )
+
+        combined_output = final_result.stdout.strip() or final_result.stderr.strip()
+        return RoutedResponse(
+            output=combined_output,
+            classification=classification,
+            initial_model=initial_model,
+            final_model=final_model,
+            fallback_used=fallback_used,
+            success=success,
+            failure_reason=failure_reason,
+            rewritten_prompt=final_rewrite.rewritten_prompt,
+            rewrite_strategy=final_rewrite.strategy,
+            latency_seconds=final_result.latency_seconds,
+        )
+
+    def _execute(
+        self,
+        prompt: str,
+        profile: str,
+        *,
+        stream_handler: Callable[[str], None] | None = None,
+    ) -> ExecutionResult:
+        if stream_handler is not None:
+            return stream_codex(prompt, profile, on_chunk=stream_handler)
+        return run_codex(prompt, profile)
+
+    def _choose_model(self, classification: Classification) -> str:
+        task_type = classification.task_type
+        if classification.complexity_score <= self.config.routing.simple_complexity_threshold:
+            if task_type in self.config.routing.prefer_local_task_types:
+                return "local"
+
+        historical_success = self.store.success_rate("local", task_type)
+        if historical_success is not None:
+            return (
+                "local"
+                if historical_success >= self.config.routing.min_local_success_rate
+                else "cloud"
+            )
+
+        if task_type in self.config.routing.cloud_task_types:
+            return "cloud"
+        return "local"
+
+    def _assess(self, result: ExecutionResult) -> tuple[bool, str]:
+        if result.exit_code != 0:
+            return False, f"codex exited with {result.exit_code}"
+
+        output = result.stdout.strip()
+        if len(output) < self.config.fallback.min_output_chars:
+            return False, "output_too_short"
+
+        for marker in self.config.fallback.failure_markers:
+            if marker.lower() in output.lower():
+                return False, f"failure_marker:{marker}"
+
+        return True, ""
+
+    def _log(
+        self,
+        *,
+        prompt: str,
+        classification: Classification,
+        model: str,
+        rewrite: RewriteResult,
+        fallback_used: bool,
+        success: bool,
+        failure_reason: str,
+        latency: float,
+    ) -> None:
+        self.store.log_request(
+            RequestRecord(
+                timestamp=datetime.now(UTC).isoformat(),
+                prompt=prompt,
+                rewritten_prompt=rewrite.rewritten_prompt,
+                task_type=classification.task_type,
+                complexity_score=classification.complexity_score,
+                chosen_model=model,
+                fallback_used=fallback_used,
+                success=success,
+                latency=latency,
+                token_estimate=classification.token_estimate,
+                rewrite_strategy=rewrite.strategy,
+                failure_reason=failure_reason,
+            )
+        )
+
+    def _with_conversation_context(
+        self, prompt: str, conversation: list[object] | None
+    ) -> str:
+        if not conversation:
+            return prompt
+
+        recent_messages = conversation[-6:]
+        formatted_messages: list[str] = []
+        for message in recent_messages:
+            role = self._message_field(message, "role")
+            content = self._message_field(message, "content")
+            if not role or not content:
+                continue
+            formatted_messages.append(f"{role}: {content}")
+
+        if not formatted_messages:
+            return prompt
+
+        context = "\n".join(formatted_messages)
+        return (
+            "Conversation context:\n"
+            f"{context}\n\n"
+            "Current user request:\n"
+            f"{prompt}"
+        )
+
+    def _message_field(self, message: object, field: str) -> str:
+        if isinstance(message, dict):
+            value = message.get(field, "")
+            return str(value)
+        try:
+            value = message[field]  # type: ignore[index]
+            return str(value)
+        except Exception:
+            pass
+        return str(getattr(message, field, ""))

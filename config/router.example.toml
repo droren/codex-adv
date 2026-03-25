@@ -1,0 +1,24 @@
+[profiles]
+local = "local"
+cloud = "cloud"
+
+[database]
+path = ".codex-adv/memory.db"
+
+[routing]
+simple_complexity_threshold = 3
+prefer_local_task_types = ["explain", "single_file_edit", "small_fix", "test_help"]
+cloud_task_types = ["multi_file_edit", "architecture", "large_refactor", "unknown"]
+min_local_success_rate = 0.7
+
+[fallback]
+enabled = true
+max_attempts = 2
+failure_markers = ["I cannot", "TODO", "not implemented", "insufficient context"]
+min_output_chars = 120
+
+[rewrites.local]
+style = "compress"
+
+[rewrites.cloud]
+style = "structure"
