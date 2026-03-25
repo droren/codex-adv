@@ -6,7 +6,13 @@ from typing import Callable
 
 from codex_adv.classifier import Classification, classify_prompt
 from codex_adv.config import AppConfig
-from codex_adv.executor import ExecutionResult, run_codex, stream_codex
+from codex_adv.executor import (
+    ExecutionResult,
+    resume_codex,
+    run_codex,
+    stream_codex,
+    stream_resume_codex,
+)
 from codex_adv.learning import LearningStore, RequestRecord
 from codex_adv.rewriters import RewriteResult, rewrite_for_cloud, rewrite_for_local
 
@@ -36,18 +42,21 @@ class Router:
         prompt: str,
         conversation: list[object] | None = None,
         stream_handler: Callable[[str], None] | None = None,
+        app_session_id: str | None = None,
     ) -> RoutedResponse:
         classification = classify_prompt(prompt)
         initial_model = self._choose_model(classification)
         routed_prompt = self._with_conversation_context(prompt, conversation)
 
-        if initial_model == "local":
+        if initial_model in {"local_fast", "local_heavy"}:
             rewrite = rewrite_for_local(
                 routed_prompt, classification, self.config.rewrites.local.style
             )
             first_result = self._execute(
                 rewrite.rewritten_prompt,
-                self.config.profiles.local,
+                initial_model,
+                self._profile_for_route(initial_model),
+                app_session_id=app_session_id,
                 stream_handler=stream_handler,
             )
         else:
@@ -56,11 +65,15 @@ class Router:
             )
             first_result = self._execute(
                 rewrite.rewritten_prompt,
+                "cloud",
                 self.config.profiles.cloud,
+                app_session_id=app_session_id,
                 stream_handler=stream_handler,
             )
 
-        first_success, first_failure_reason = self._assess(first_result)
+        first_success, first_failure_reason = self._assess(
+            first_result, classification
+        )
         final_result = first_result
         final_model = initial_model
         fallback_used = False
@@ -68,7 +81,7 @@ class Router:
 
         if (
             not first_success
-            and initial_model == "local"
+            and initial_model in {"local_fast", "local_heavy"}
             and self.config.fallback.enabled
             and self.config.fallback.max_attempts > 1
         ):
@@ -83,11 +96,13 @@ class Router:
             )
             final_result = self._execute(
                 final_rewrite.rewritten_prompt,
+                "cloud",
                 self.config.profiles.cloud,
+                app_session_id=app_session_id,
                 stream_handler=stream_handler,
             )
 
-        success, failure_reason = self._assess(final_result)
+        success, failure_reason = self._assess(final_result, classification)
         self._log(
             prompt=prompt,
             classification=classification,
@@ -117,23 +132,59 @@ class Router:
     def _execute(
         self,
         prompt: str,
+        route: str,
         profile: str,
         *,
+        app_session_id: str | None = None,
         stream_handler: Callable[[str], None] | None = None,
     ) -> ExecutionResult:
+        existing_session_id = (
+            self.store.get_exec_session_id(app_session_id, route)
+            if app_session_id is not None
+            else None
+        )
+
         if stream_handler is not None:
-            return stream_codex(prompt, profile, on_chunk=stream_handler)
-        return run_codex(prompt, profile)
+            result = (
+                stream_resume_codex(prompt, existing_session_id, on_chunk=stream_handler)
+                if existing_session_id
+                else stream_codex(prompt, profile, on_chunk=stream_handler)
+            )
+        else:
+            result = (
+                resume_codex(prompt, existing_session_id)
+                if existing_session_id
+                else run_codex(prompt, profile)
+            )
+
+        if existing_session_id and result.exit_code != 0:
+            if app_session_id is not None:
+                self.store.clear_exec_session_id(app_session_id, route)
+            result = (
+                stream_codex(prompt, profile, on_chunk=stream_handler)
+                if stream_handler is not None
+                else run_codex(prompt, profile)
+            )
+
+        if app_session_id is not None and result.session_id:
+            self.store.set_exec_session_id(app_session_id, route, result.session_id)
+        return result
 
     def _choose_model(self, classification: Classification) -> str:
         task_type = classification.task_type
+        if classification.requires_web:
+            return "cloud"
+        if task_type in {"unknown", "explain"}:
+            return "local_fast"
         if task_type in self.config.routing.prefer_local_task_types:
-            return "local"
+            return "local_fast"
+        if task_type in {"multi_file_edit", "architecture", "large_refactor"}:
+            return "local_heavy"
 
-        historical_success = self.store.success_rate("local", task_type)
+        historical_success = self.store.success_rate("local_heavy", task_type)
         if historical_success is not None:
             return (
-                "local"
+                "local_heavy"
                 if historical_success >= self.config.routing.min_local_success_rate
                 else "cloud"
             )
@@ -143,14 +194,17 @@ class Router:
             and task_type in self.config.routing.cloud_task_types
         ):
             return "cloud"
-        return "local"
+        return "local_fast"
 
-    def _assess(self, result: ExecutionResult) -> tuple[bool, str]:
+    def _assess(
+        self, result: ExecutionResult, classification: Classification
+    ) -> tuple[bool, str]:
         if result.exit_code != 0:
             return False, f"codex exited with {result.exit_code}"
 
         output = result.stdout.strip()
-        if len(output) < self.config.fallback.min_output_chars:
+        min_output_chars = self._min_output_chars(classification)
+        if len(output) < min_output_chars:
             return False, "output_too_short"
 
         for marker in self.config.fallback.failure_markers:
@@ -158,6 +212,22 @@ class Router:
                 return False, f"failure_marker:{marker}"
 
         return True, ""
+
+    def _min_output_chars(self, classification: Classification) -> int:
+        if classification.task_type in {"unknown", "explain"}:
+            return 1
+        if classification.task_type in {"small_fix", "test_help"}:
+            return min(20, self.config.fallback.min_output_chars)
+        return self.config.fallback.min_output_chars
+
+    def _profile_for_route(self, route: str) -> str:
+        if route == "local_fast":
+            return self.config.profiles.local_fast
+        if route == "local_heavy":
+            return self.config.profiles.local_heavy
+        if route == "cloud":
+            return self.config.profiles.cloud
+        raise ValueError(f"Unknown route: {route}")
 
     def _log(
         self,

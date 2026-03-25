@@ -9,12 +9,33 @@ class Classification:
     task_type: str
     complexity_score: int
     token_estimate: int
+    requires_web: bool = False
 
 
 def classify_prompt(prompt: str) -> Classification:
     lowered = prompt.lower()
     words = re.findall(r"\S+", prompt)
     token_estimate = max(1, int(len(prompt) / 4))
+    requires_web = any(
+        keyword in lowered
+        for keyword in (
+            "latest news",
+            "current news",
+            "news in the world",
+            "search the web",
+            "search for",
+            "look up",
+            "browse",
+            "web search",
+            "current events",
+            "what's happening",
+            "what is happening",
+            "today's news",
+            "latest headlines",
+            "online",
+            "on the web",
+        )
+    )
 
     complexity_score = 1
     if len(words) > 30:
@@ -46,4 +67,5 @@ def classify_prompt(prompt: str) -> Classification:
         task_type=task_type,
         complexity_score=min(complexity_score, 5),
         token_estimate=token_estimate,
+        requires_web=requires_web,
     )

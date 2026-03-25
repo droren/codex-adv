@@ -12,7 +12,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    local_fast_exec_session_id TEXT NOT NULL DEFAULT '',
+    local_heavy_exec_session_id TEXT NOT NULL DEFAULT '',
+    cloud_exec_session_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -90,6 +93,35 @@ class LearningStore:
     def _init_db(self) -> None:
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._ensure_session_columns(connection)
+
+    def _ensure_session_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "local_exec_session_id" in columns and "local_fast_exec_session_id" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''"
+            )
+            connection.execute(
+                "UPDATE sessions SET local_fast_exec_session_id = local_exec_session_id WHERE local_exec_session_id != ''"
+            )
+            columns.add("local_fast_exec_session_id")
+        if "local_fast_exec_session_id" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''"
+            )
+            columns.add("local_fast_exec_session_id")
+        if "local_heavy_exec_session_id" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN local_heavy_exec_session_id TEXT NOT NULL DEFAULT ''"
+            )
+            columns.add("local_heavy_exec_session_id")
+        if "cloud_exec_session_id" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN cloud_exec_session_id TEXT NOT NULL DEFAULT ''"
+            )
 
     def create_session(self, title: str, timestamp: str) -> SessionRecord:
         session = SessionRecord(
@@ -139,6 +171,28 @@ class LearningStore:
                 """,
                 (session_id,),
             ).fetchone()
+
+    def get_exec_session_id(self, session_id: str, route: str) -> str | None:
+        column = self._route_column(route)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {column} FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        return str(row[0])
+
+    def set_exec_session_id(self, session_id: str, route: str, exec_session_id: str) -> None:
+        column = self._route_column(route)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE sessions SET {column} = ? WHERE id = ?",
+                (exec_session_id, session_id),
+            )
+
+    def clear_exec_session_id(self, session_id: str, route: str) -> None:
+        self.set_exec_session_id(session_id, route, "")
 
     def find_session_by_prefix(self, session_prefix: str) -> sqlite3.Row | None:
         with self._connect() as connection:
@@ -194,6 +248,17 @@ class LearningStore:
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
                 (record.timestamp, record.session_id),
             )
+
+    def _route_column(self, route: str) -> str:
+        if route == "local":
+            return "local_fast_exec_session_id"
+        if route == "local_fast":
+            return "local_fast_exec_session_id"
+        if route == "local_heavy":
+            return "local_heavy_exec_session_id"
+        if route == "cloud":
+            return "cloud_exec_session_id"
+        raise ValueError(f"Unknown route: {route}")
 
     def get_messages(self, session_id: str, limit: int | None = None) -> list[sqlite3.Row]:
         query = """

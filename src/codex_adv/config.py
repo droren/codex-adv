@@ -7,7 +7,8 @@ import tomllib
 
 @dataclass(slots=True)
 class ProfilesConfig:
-    local: str = "local"
+    local_fast: str = "local"
+    local_heavy: str = "local"
     cloud: str = "cloud"
 
 
@@ -106,7 +107,18 @@ def load_config(config_path: str | Path | None) -> AppConfig:
 
     return AppConfig(
         profiles=ProfilesConfig(
-            local=str(profiles_data.get("local", DEFAULT_CONFIG.profiles.local)),
+            local_fast=str(
+                profiles_data.get(
+                    "local_fast",
+                    profiles_data.get("local", DEFAULT_CONFIG.profiles.local_fast),
+                )
+            ),
+            local_heavy=str(
+                profiles_data.get(
+                    "local_heavy",
+                    profiles_data.get("local", DEFAULT_CONFIG.profiles.local_heavy),
+                )
+            ),
             cloud=str(profiles_data.get("cloud", DEFAULT_CONFIG.profiles.cloud)),
         ),
         database=DatabaseConfig(

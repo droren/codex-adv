@@ -1,5 +1,6 @@
 [profiles]
-local = "local"
+local_fast = "qwen-fast-mpro-tb"
+local_heavy = "qwen-mpro-tb"
 cloud = "cloud"
 
 [database]
@@ -15,7 +16,7 @@ min_local_success_rate = 0.7
 enabled = true
 max_attempts = 2
 failure_markers = ["I cannot", "TODO", "not implemented", "insufficient context"]
-min_output_chars = 120
+min_output_chars = 40
 
 [rewrites.local]
 style = "compress"

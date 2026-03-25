@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 
+from codex_adv.debug import DebugOutputFilter
 from codex_adv.input import ChatInput
 from codex_adv.learning import LearningStore, MessageRecord, SessionRecord
 from codex_adv.router import Router, RoutedResponse
@@ -208,13 +209,20 @@ class InteractiveChat:
         )
         history = self.store.get_messages(state.session.id)
         self.ui.print_assistant_header("working")
+        debug_filter = DebugOutputFilter()
+        debug_handler = None
         if state.debug_enabled:
             self.ui.print_debug_header()
+            def debug_handler(chunk: str) -> None:
+                filtered = debug_filter.transform(chunk)
+                if filtered:
+                    self.ui.debug_chunk(filtered)
         with self.ui.working(self._working_message(prompt, state)):
             response = self.router.run(
                 prompt,
                 conversation=history[:-1],
-                stream_handler=self.ui.debug_chunk if state.debug_enabled else None,
+                stream_handler=debug_handler,
+                app_session_id=state.session.id,
             )
         state.last_response = response
 
