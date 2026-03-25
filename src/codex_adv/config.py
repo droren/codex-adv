@@ -54,6 +54,12 @@ class RewriteStyleConfig:
 
 
 @dataclass(slots=True)
+class ExecutionConfig:
+    web_search: str = "disabled"
+    dangerous_bypass_approvals_and_sandbox: bool = False
+
+
+@dataclass(slots=True)
 class RewritesConfig:
     local: RewriteStyleConfig
     cloud: RewriteStyleConfig
@@ -65,6 +71,7 @@ class AppConfig:
     database: DatabaseConfig
     routing: RoutingConfig
     fallback: FallbackConfig
+    execution: ExecutionConfig
     rewrites: RewritesConfig
 
 
@@ -73,6 +80,7 @@ DEFAULT_CONFIG = AppConfig(
     database=DatabaseConfig(),
     routing=RoutingConfig(),
     fallback=FallbackConfig(),
+    execution=ExecutionConfig(),
     rewrites=RewritesConfig(
         local=RewriteStyleConfig(style="compress"),
         cloud=RewriteStyleConfig(style="structure"),
@@ -101,6 +109,7 @@ def load_config(config_path: str | Path | None) -> AppConfig:
     database_data = data.get("database", {})
     routing_data = data.get("routing", {})
     fallback_data = data.get("fallback", {})
+    execution_data = data.get("execution", {})
     rewrites_data = data.get("rewrites", {})
     rewrites_local = rewrites_data.get("local", {})
     rewrites_cloud = rewrites_data.get("cloud", {})
@@ -160,6 +169,17 @@ def load_config(config_path: str | Path | None) -> AppConfig:
             min_output_chars=int(
                 fallback_data.get(
                     "min_output_chars", DEFAULT_CONFIG.fallback.min_output_chars
+                )
+            ),
+        ),
+        execution=ExecutionConfig(
+            web_search=str(
+                execution_data.get("web_search", DEFAULT_CONFIG.execution.web_search)
+            ),
+            dangerous_bypass_approvals_and_sandbox=bool(
+                execution_data.get(
+                    "dangerous_bypass_approvals_and_sandbox",
+                    DEFAULT_CONFIG.execution.dangerous_bypass_approvals_and_sandbox,
                 )
             ),
         ),

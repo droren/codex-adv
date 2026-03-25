@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import shutil
@@ -20,6 +21,9 @@ class ExecutionResult:
     exit_code: int
     latency_seconds: float
     session_id: str | None
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
 
 
 class CodexExecutionError(RuntimeError):
@@ -29,6 +33,12 @@ class CodexExecutionError(RuntimeError):
 StreamHandler = Callable[[str], None]
 
 
+@dataclass(slots=True)
+class ExecutorSettings:
+    web_search: str = "disabled"
+    dangerous_bypass_approvals_and_sandbox: bool = False
+
+
 def ensure_codex_available() -> None:
     if shutil.which("codex") is None:
         raise CodexExecutionError(
@@ -36,16 +46,26 @@ def ensure_codex_available() -> None:
         )
 
 
-def run_codex(prompt: str, profile: str, workdir: str | Path | None = None) -> ExecutionResult:
-    return _run_codex_command(prompt, profile, workdir=workdir, session_id=None)
+def run_codex(
+    prompt: str,
+    profile: str,
+    workdir: str | Path | None = None,
+    settings: ExecutorSettings | None = None,
+) -> ExecutionResult:
+    return _run_codex_command(
+        prompt, profile, workdir=workdir, session_id=None, settings=settings
+    )
 
 
 def resume_codex(
     prompt: str,
     session_id: str,
     workdir: str | Path | None = None,
+    settings: ExecutorSettings | None = None,
 ) -> ExecutionResult:
-    return _run_codex_command(prompt, None, workdir=workdir, session_id=session_id)
+    return _run_codex_command(
+        prompt, None, workdir=workdir, session_id=session_id, settings=settings
+    )
 
 
 def _run_codex_command(
@@ -54,13 +74,20 @@ def _run_codex_command(
     *,
     workdir: str | Path | None,
     session_id: str | None,
+    settings: ExecutorSettings | None,
 ) -> ExecutionResult:
     ensure_codex_available()
 
     with tempfile.NamedTemporaryFile(prefix="codex-adv-", suffix=".txt", delete=False) as handle:
         output_path = Path(handle.name)
 
-    command = _build_command(prompt, profile, output_path, session_id=session_id)
+    command = _build_command(
+        prompt,
+        profile,
+        output_path,
+        session_id=session_id,
+        settings=settings or ExecutorSettings(),
+    )
     try:
         started = time.perf_counter()
         completed = subprocess.run(
@@ -85,6 +112,9 @@ def _run_codex_command(
         exit_code=completed.returncode,
         latency_seconds=latency,
         session_id=parsed_session_id or session_id,
+        input_tokens=_extract_usage(completed.stdout)["input_tokens"],
+        output_tokens=_extract_usage(completed.stdout)["output_tokens"],
+        cached_input_tokens=_extract_usage(completed.stdout)["cached_input_tokens"],
     )
 
 
@@ -94,8 +124,16 @@ def stream_codex(
     *,
     workdir: str | Path | None = None,
     on_chunk: StreamHandler | None = None,
+    settings: ExecutorSettings | None = None,
 ) -> ExecutionResult:
-    return _stream_codex_command(prompt, profile, workdir=workdir, on_chunk=on_chunk, session_id=None)
+    return _stream_codex_command(
+        prompt,
+        profile,
+        workdir=workdir,
+        on_chunk=on_chunk,
+        session_id=None,
+        settings=settings,
+    )
 
 
 def stream_resume_codex(
@@ -104,6 +142,7 @@ def stream_resume_codex(
     *,
     workdir: str | Path | None = None,
     on_chunk: StreamHandler | None = None,
+    settings: ExecutorSettings | None = None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -111,6 +150,7 @@ def stream_resume_codex(
         workdir=workdir,
         on_chunk=on_chunk,
         session_id=session_id,
+        settings=settings,
     )
 
 
@@ -121,13 +161,20 @@ def _stream_codex_command(
     workdir: str | Path | None = None,
     on_chunk: StreamHandler | None = None,
     session_id: str | None = None,
+    settings: ExecutorSettings | None = None,
 ) -> ExecutionResult:
     ensure_codex_available()
 
     with tempfile.NamedTemporaryFile(prefix="codex-adv-", suffix=".txt", delete=False) as handle:
         output_path = Path(handle.name)
 
-    command = _build_command(prompt, profile, output_path, session_id=session_id)
+    command = _build_command(
+        prompt,
+        profile,
+        output_path,
+        session_id=session_id,
+        settings=settings or ExecutorSettings(),
+    )
     started = time.perf_counter()
     try:
         process = subprocess.Popen(
@@ -163,6 +210,9 @@ def _stream_codex_command(
         exit_code=exit_code,
         latency_seconds=latency,
         session_id=parsed_session_id or session_id,
+        input_tokens=_extract_usage("".join(chunks))["input_tokens"],
+        output_tokens=_extract_usage("".join(chunks))["output_tokens"],
+        cached_input_tokens=_extract_usage("".join(chunks))["cached_input_tokens"],
     )
 
 
@@ -172,13 +222,22 @@ def _build_command(
     output_path: Path,
     *,
     session_id: str | None,
+    settings: ExecutorSettings,
 ) -> list[str]:
+    config_flags: list[str] = []
+    if settings.web_search != "disabled":
+        config_flags.extend(["-c", f'web_search="{settings.web_search}"'])
+    if settings.dangerous_bypass_approvals_and_sandbox:
+        config_flags.append("--dangerously-bypass-approvals-and-sandbox")
+
     if session_id:
         return [
             "codex",
             "exec",
             "resume",
+            *config_flags,
             session_id,
+            "--json",
             "-o",
             str(output_path),
             prompt,
@@ -190,10 +249,10 @@ def _build_command(
     return [
         "codex",
         "exec",
+        *config_flags,
         "--profile",
         profile,
-        "--color",
-        "never",
+        "--json",
         "-o",
         str(output_path),
         prompt,
@@ -206,6 +265,15 @@ def _read_final_output(output_path: Path, fallback: str) -> str:
 
 
 def _extract_session_id(raw_output: str) -> str | None:
+    for line in raw_output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "thread.started":
+            thread_id = event.get("thread_id")
+            if isinstance(thread_id, str):
+                return thread_id
     match = re.search(
         r"session id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
         raw_output,
@@ -214,3 +282,25 @@ def _extract_session_id(raw_output: str) -> str | None:
     if not match:
         return None
     return match.group(1)
+
+
+def _extract_usage(raw_output: str) -> dict[str, int]:
+    usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+    }
+    for line in raw_output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "turn.completed":
+            continue
+        payload = event.get("usage", {})
+        if not isinstance(payload, dict):
+            continue
+        usage["input_tokens"] = int(payload.get("input_tokens", 0) or 0)
+        usage["output_tokens"] = int(payload.get("output_tokens", 0) or 0)
+        usage["cached_input_tokens"] = int(payload.get("cached_input_tokens", 0) or 0)
+    return usage

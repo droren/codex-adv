@@ -25,6 +25,7 @@ HELP_TEXT = """Commands:
 /sessions            List recent sessions
 /history [n]         Show messages in this session
 /stats               Show routing stats
+/usage               Show token/request usage for this session
 /route               Show details for the last routed turn
 /clear               Clear the screen
 """
@@ -42,10 +43,15 @@ class InteractiveChat:
         self.router = router
         self.store = store
         self.ui = TerminalUI()
-        self.input = ChatInput(Path(".codex-adv/input-history.txt"))
+        self.state_for_toolbar: ChatState | None = None
+        self.input = ChatInput(
+            Path(".codex-adv/input-history.txt"),
+            bottom_toolbar=self._bottom_toolbar,
+        )
 
     def start(self, resume_latest: bool = True) -> int:
         state = self._load_or_create_session(resume_latest=resume_latest)
+        self.state_for_toolbar = state
         self._print_banner(state)
 
         while True:
@@ -145,6 +151,9 @@ class InteractiveChat:
                 ("model", "task_type", "total", "success_rate", "avg_latency", "fallbacks"),
                 table_rows,
             )
+            return True
+        if command == "/usage":
+            self._print_usage(state.session.id)
             return True
         if command == "/route":
             self._print_last_route(state.last_response)
@@ -278,3 +287,59 @@ class InteractiveChat:
     def _working_message(self, prompt: str, state: ChatState) -> str:
         task = "local-first routing"
         return f"{task} for session {state.session.id[:8]}..."
+
+    def _print_usage(self, session_id: str) -> None:
+        totals = self.store.session_usage_totals(session_id)
+        rows = self.store.session_usage(session_id)
+        if totals["total_requests"] == 0:
+            self.ui.print_info("No usage yet in this session.")
+            return
+
+        table_rows = [
+            (
+                str(row["chosen_model"]),
+                str(row["total_requests"]),
+                str(row["actual_tokens_used"] or 0),
+                str(row["avg_latency"]),
+                str(row["fallbacks"]),
+            )
+            for row in rows
+        ]
+        self.ui.print_stats(
+            ("model", "requests", "tokens", "avg_latency", "fallbacks"),
+            table_rows,
+        )
+        self.ui.print_info(
+            "session total: "
+            f"{totals['total_requests']} requests, "
+            f"{totals['actual_tokens_used']} tokens, "
+            f"local={totals['local_tokens']}, cloud={totals['cloud_tokens']}"
+        )
+
+    def _bottom_toolbar(self) -> str:
+        state = self.state_for_toolbar
+        if state is None:
+            return ""
+
+        session_id = state.session.id[:8]
+        cwd = os.getcwd()
+        branch = self._git_branch()
+        totals = self.store.session_usage_totals(state.session.id)
+        last_model = state.last_response.final_model if state.last_response else "idle"
+        total_requests = totals["total_requests"] or 0
+        total_tokens = totals["actual_tokens_used"] or 0
+        return (
+            f" {last_model} | {cwd} | {branch} | "
+            f"req {total_requests} | tok {total_tokens} | "
+            f"local {totals['local_tokens'] or 0} | cloud {totals['cloud_tokens'] or 0} | "
+            f"session {session_id} "
+        )
+
+    def _git_branch(self) -> str:
+        git_head = Path(".git/HEAD")
+        if not git_head.exists():
+            return "no-git"
+        content = git_head.read_text().strip()
+        if content.startswith("ref: "):
+            return content.rsplit("/", 1)[-1]
+        return content[:8]

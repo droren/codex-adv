@@ -18,6 +18,10 @@ max_attempts = 2
 failure_markers = ["I cannot", "TODO", "not implemented", "insufficient context"]
 min_output_chars = 40
 
+[execution]
+web_search = "disabled"
+dangerous_bypass_approvals_and_sandbox = false
+
 [rewrites.local]
 style = "compress"
 

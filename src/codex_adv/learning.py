@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL DEFAULT '',
     timestamp TEXT NOT NULL,
     prompt TEXT NOT NULL,
     rewritten_prompt TEXT NOT NULL,
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS requests (
     success INTEGER NOT NULL,
     latency REAL NOT NULL,
     token_estimate INTEGER NOT NULL,
+    actual_tokens_used INTEGER NOT NULL DEFAULT 0,
     rewrite_strategy TEXT NOT NULL DEFAULT '',
     failure_reason TEXT NOT NULL DEFAULT ''
 );
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS requests (
 
 @dataclass(slots=True)
 class RequestRecord:
+    session_id: str
     timestamp: str
     prompt: str
     rewritten_prompt: str
@@ -59,6 +62,7 @@ class RequestRecord:
     success: bool
     latency: float
     token_estimate: int
+    actual_tokens_used: int
     rewrite_strategy: str
     failure_reason: str = ""
 
@@ -94,6 +98,7 @@ class LearningStore:
         with self._connect() as connection:
             connection.executescript(SCHEMA)
             self._ensure_session_columns(connection)
+            self._ensure_request_columns(connection)
 
     def _ensure_session_columns(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -121,6 +126,20 @@ class LearningStore:
         if "cloud_exec_session_id" not in columns:
             connection.execute(
                 "ALTER TABLE sessions ADD COLUMN cloud_exec_session_id TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _ensure_request_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(requests)").fetchall()
+        }
+        if "session_id" not in columns:
+            connection.execute(
+                "ALTER TABLE requests ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "actual_tokens_used" not in columns:
+            connection.execute(
+                "ALTER TABLE requests ADD COLUMN actual_tokens_used INTEGER NOT NULL DEFAULT 0"
             )
 
     def create_session(self, title: str, timestamp: str) -> SessionRecord:
@@ -281,6 +300,7 @@ class LearningStore:
             connection.execute(
                 """
                 INSERT INTO requests (
+                    session_id,
                     timestamp,
                     prompt,
                     rewritten_prompt,
@@ -291,12 +311,14 @@ class LearningStore:
                     success,
                     latency,
                     token_estimate,
+                    actual_tokens_used,
                     rewrite_strategy,
                     failure_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    record.session_id,
                     record.timestamp,
                     record.prompt,
                     record.rewritten_prompt,
@@ -307,6 +329,7 @@ class LearningStore:
                     int(record.success),
                     record.latency,
                     record.token_estimate,
+                    record.actual_tokens_used,
                     record.rewrite_strategy,
                     record.failure_reason,
                 ),
@@ -339,9 +362,46 @@ class LearningStore:
                     COUNT(*) AS total_requests,
                     ROUND(AVG(success), 3) AS success_rate,
                     ROUND(AVG(latency), 3) AS avg_latency,
-                    SUM(fallback_used) AS fallbacks
+                    SUM(fallback_used) AS fallbacks,
+                    SUM(actual_tokens_used) AS actual_tokens_used
                 FROM requests
                 GROUP BY chosen_model, task_type
                 ORDER BY total_requests DESC, chosen_model, task_type
                 """
             ).fetchall()
+
+    def session_usage(self, session_id: str) -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            return connection.execute(
+                """
+                SELECT
+                    chosen_model,
+                    COUNT(*) AS total_requests,
+                    SUM(actual_tokens_used) AS actual_tokens_used,
+                    ROUND(AVG(latency), 3) AS avg_latency,
+                    SUM(fallback_used) AS fallbacks
+                FROM requests
+                WHERE session_id = ?
+                GROUP BY chosen_model
+                ORDER BY total_requests DESC, chosen_model
+                """,
+                (session_id,),
+            ).fetchall()
+
+    def session_usage_totals(self, session_id: str) -> sqlite3.Row:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            return connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_requests,
+                    COALESCE(SUM(actual_tokens_used), 0) AS actual_tokens_used,
+                    ROUND(COALESCE(AVG(latency), 0), 3) AS avg_latency,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN actual_tokens_used ELSE 0 END), 0) AS cloud_tokens,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN actual_tokens_used ELSE 0 END), 0) AS local_tokens
+                FROM requests
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()

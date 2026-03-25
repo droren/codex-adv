@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, UTC
+import re
 from typing import Callable
 
 from codex_adv.classifier import Classification, classify_prompt
 from codex_adv.config import AppConfig
 from codex_adv.executor import (
     ExecutionResult,
+    ExecutorSettings,
     resume_codex,
     run_codex,
     stream_codex,
@@ -104,6 +106,7 @@ class Router:
 
         success, failure_reason = self._assess(final_result, classification)
         self._log(
+            session_id=app_session_id or "",
             prompt=prompt,
             classification=classification,
             model=final_model,
@@ -112,6 +115,7 @@ class Router:
             success=success,
             failure_reason=failure_reason if success is False else first_failure_reason,
             latency=final_result.latency_seconds,
+            actual_tokens_used=final_result.input_tokens + final_result.output_tokens,
         )
 
         combined_output = final_result.stdout.strip() or final_result.stderr.strip()
@@ -146,24 +150,51 @@ class Router:
 
         if stream_handler is not None:
             result = (
-                stream_resume_codex(prompt, existing_session_id, on_chunk=stream_handler)
+                stream_resume_codex(
+                    prompt,
+                    existing_session_id,
+                    on_chunk=stream_handler,
+                    settings=self._executor_settings(),
+                )
                 if existing_session_id
-                else stream_codex(prompt, profile, on_chunk=stream_handler)
+                else stream_codex(
+                    prompt,
+                    profile,
+                    on_chunk=stream_handler,
+                    settings=self._executor_settings(),
+                )
             )
         else:
             result = (
-                resume_codex(prompt, existing_session_id)
+                resume_codex(
+                    prompt,
+                    existing_session_id,
+                    settings=self._executor_settings(),
+                )
                 if existing_session_id
-                else run_codex(prompt, profile)
+                else run_codex(
+                    prompt,
+                    profile,
+                    settings=self._executor_settings(),
+                )
             )
 
         if existing_session_id and result.exit_code != 0:
             if app_session_id is not None:
                 self.store.clear_exec_session_id(app_session_id, route)
             result = (
-                stream_codex(prompt, profile, on_chunk=stream_handler)
+                stream_codex(
+                    prompt,
+                    profile,
+                    on_chunk=stream_handler,
+                    settings=self._executor_settings(),
+                )
                 if stream_handler is not None
-                else run_codex(prompt, profile)
+                else run_codex(
+                    prompt,
+                    profile,
+                    settings=self._executor_settings(),
+                )
             )
 
         if app_session_id is not None and result.session_id:
@@ -229,9 +260,18 @@ class Router:
             return self.config.profiles.cloud
         raise ValueError(f"Unknown route: {route}")
 
+    def _executor_settings(self) -> ExecutorSettings:
+        return ExecutorSettings(
+            web_search=self.config.execution.web_search,
+            dangerous_bypass_approvals_and_sandbox=(
+                self.config.execution.dangerous_bypass_approvals_and_sandbox
+            ),
+        )
+
     def _log(
         self,
         *,
+        session_id: str,
         prompt: str,
         classification: Classification,
         model: str,
@@ -240,9 +280,11 @@ class Router:
         success: bool,
         failure_reason: str,
         latency: float,
+        actual_tokens_used: int,
     ) -> None:
         self.store.log_request(
             RequestRecord(
+                session_id=session_id,
                 timestamp=datetime.now(UTC).isoformat(),
                 prompt=prompt,
                 rewritten_prompt=rewrite.rewritten_prompt,
@@ -253,10 +295,12 @@ class Router:
                 success=success,
                 latency=latency,
                 token_estimate=classification.token_estimate,
+                actual_tokens_used=actual_tokens_used,
                 rewrite_strategy=rewrite.strategy,
                 failure_reason=failure_reason,
             )
         )
+
 
     def _with_conversation_context(
         self, prompt: str, conversation: list[object] | None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -19,6 +20,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/sessions", "List recent sessions"),
     ("/history", "Show chat history"),
     ("/stats", "Show routing stats"),
+    ("/usage", "Show session token usage"),
     ("/route", "Show last route"),
     ("/clear", "Clear the screen"),
 )
@@ -41,7 +43,11 @@ class SlashCommandCompleter(Completer):
 
 
 class ChatInput:
-    def __init__(self, history_path: str | Path) -> None:
+    def __init__(
+        self,
+        history_path: str | Path,
+        bottom_toolbar: Callable[[], str] | None = None,
+    ) -> None:
         path = Path(history_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.session = PromptSession(
@@ -50,6 +56,7 @@ class ChatInput:
             complete_while_typing=True,
             complete_style=CompleteStyle.MULTI_COLUMN,
             reserve_space_for_menu=8,
+            bottom_toolbar=bottom_toolbar,
         )
 
     def prompt(self, message: str) -> str:
