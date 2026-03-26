@@ -59,5 +59,5 @@ class ChatInput:
             bottom_toolbar=bottom_toolbar,
         )
 
-    def prompt(self, message: str) -> str:
-        return self.session.prompt(message)
+    def prompt(self, message: str, default: str = "") -> str:
+        return self.session.prompt(message, default=default)

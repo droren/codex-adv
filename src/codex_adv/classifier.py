@@ -49,9 +49,19 @@ def classify_prompt(prompt: str) -> Classification:
         complexity_score += 2
     if any(keyword in lowered for keyword in ("tests", "refactor", "backend")):
         complexity_score += 1
+    if any(keyword in lowered for keyword in ("game", "tetris", "app", "website", "ui")):
+        complexity_score += 2
+    if any(keyword in lowered for keyword in ("create", "build", "implement", "generate")):
+        complexity_score += 1
 
     if any(keyword in lowered for keyword in ("explain", "summarize", "what does")):
         task_type = "explain"
+    elif any(keyword in lowered for keyword in ("game", "tetris")):
+        task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
+    elif any(keyword in lowered for keyword in ("create", "build", "implement", "generate")) and any(
+        keyword in lowered for keyword in ("app", "website", "script", "program", "tool")
+    ):
+        task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
     elif any(keyword in lowered for keyword in ("test", "pytest", "unit test")):
         task_type = "test_help" if complexity_score <= 3 else "multi_file_edit"
     elif any(keyword in lowered for keyword in ("refactor", "backend", "module")):

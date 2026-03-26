@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, UTC
-import re
+import threading
 from typing import Callable
 
 from codex_adv.classifier import Classification, classify_prompt
@@ -45,6 +45,7 @@ class Router:
         conversation: list[object] | None = None,
         stream_handler: Callable[[str], None] | None = None,
         app_session_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> RoutedResponse:
         classification = classify_prompt(prompt)
         initial_model = self._choose_model(classification)
@@ -60,6 +61,7 @@ class Router:
                 self._profile_for_route(initial_model),
                 app_session_id=app_session_id,
                 stream_handler=stream_handler,
+                cancel_event=cancel_event,
             )
         else:
             rewrite = rewrite_for_cloud(
@@ -71,6 +73,7 @@ class Router:
                 self.config.profiles.cloud,
                 app_session_id=app_session_id,
                 stream_handler=stream_handler,
+                cancel_event=cancel_event,
             )
 
         first_success, first_failure_reason = self._assess(
@@ -86,6 +89,7 @@ class Router:
             and initial_model in {"local_fast", "local_heavy"}
             and self.config.fallback.enabled
             and self.config.fallback.max_attempts > 1
+            and not first_result.interrupted
         ):
             fallback_used = True
             final_model = "cloud"
@@ -102,6 +106,7 @@ class Router:
                 self.config.profiles.cloud,
                 app_session_id=app_session_id,
                 stream_handler=stream_handler,
+                cancel_event=cancel_event,
             )
 
         success, failure_reason = self._assess(final_result, classification)
@@ -141,6 +146,7 @@ class Router:
         *,
         app_session_id: str | None = None,
         stream_handler: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ExecutionResult:
         existing_session_id = (
             self.store.get_exec_session_id(app_session_id, route)
@@ -155,6 +161,7 @@ class Router:
                     existing_session_id,
                     on_chunk=stream_handler,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
                 if existing_session_id
                 else stream_codex(
@@ -162,6 +169,7 @@ class Router:
                     profile,
                     on_chunk=stream_handler,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
             )
         else:
@@ -170,16 +178,18 @@ class Router:
                     prompt,
                     existing_session_id,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
                 if existing_session_id
                 else run_codex(
                     prompt,
                     profile,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
             )
 
-        if existing_session_id and result.exit_code != 0:
+        if existing_session_id and result.exit_code != 0 and not result.interrupted:
             if app_session_id is not None:
                 self.store.clear_exec_session_id(app_session_id, route)
             result = (
@@ -188,12 +198,14 @@ class Router:
                     profile,
                     on_chunk=stream_handler,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
                 if stream_handler is not None
                 else run_codex(
                     prompt,
                     profile,
                     settings=self._executor_settings(),
+                    cancel_event=cancel_event,
                 )
             )
 
@@ -231,6 +243,8 @@ class Router:
         self, result: ExecutionResult, classification: Classification
     ) -> tuple[bool, str]:
         if result.exit_code != 0:
+            if result.interrupted:
+                return False, "interrupted"
             return False, f"codex exited with {result.exit_code}"
 
         output = result.stdout.strip()

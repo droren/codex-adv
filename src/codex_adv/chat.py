@@ -4,9 +4,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import os
 from pathlib import Path
+import queue
+import select
 import shlex
+import sys
+import termios
+import threading
+import time
+import tty
 
-from codex_adv.debug import DebugOutputFilter
+from codex_adv.debug import DebugOutputFormatter
 from codex_adv.input import ChatInput
 from codex_adv.learning import LearningStore, MessageRecord, SessionRecord
 from codex_adv.router import Router, RoutedResponse
@@ -19,6 +26,8 @@ HELP_TEXT = """Commands:
 /exit                Exit chat
 /new [title]         Start a new session
 /debug [on|off]      Toggle execution debug output
+/continue            Continue the saved draft request
+/discard             Discard the saved draft request
 /switch <id-prefix>  Switch to another recent session
 /rename <title>      Rename the current session
 /session             Show current session id and title
@@ -36,6 +45,7 @@ class ChatState:
     session: SessionRecord
     last_response: RoutedResponse | None = None
     debug_enabled: bool = False
+    draft_prompt: str = ""
 
 
 class InteractiveChat:
@@ -56,7 +66,8 @@ class InteractiveChat:
 
         while True:
             try:
-                raw = self.input.prompt(self.ui.prompt()).strip()
+                default = state.draft_prompt
+                raw = self.input.prompt(self.ui.prompt(), default=default).strip()
             except EOFError:
                 print()
                 return 0
@@ -66,6 +77,9 @@ class InteractiveChat:
 
             if not raw:
                 continue
+
+            if state.draft_prompt and raw != state.draft_prompt:
+                state.draft_prompt = ""
 
             if raw.startswith("/"):
                 should_continue = self._handle_command(raw, state)
@@ -117,6 +131,17 @@ class InteractiveChat:
                 self.ui.print_warning("Usage: /debug [on|off]")
                 return True
             self.ui.print_info(f"debug: {'on' if state.debug_enabled else 'off'}")
+            return True
+        if command == "/continue":
+            if not state.draft_prompt:
+                self.ui.print_info("No saved draft to continue.")
+                return True
+            self._run_turn(state.draft_prompt, state)
+            state.draft_prompt = ""
+            return True
+        if command == "/discard":
+            state.draft_prompt = ""
+            self.ui.print_info("Draft discarded.")
             return True
         if command == "/session":
             self.ui.print_info(f"{state.session.id}  {state.session.title}")
@@ -218,22 +243,48 @@ class InteractiveChat:
         )
         history = self.store.get_messages(state.session.id)
         self.ui.print_assistant_header("working")
-        debug_filter = DebugOutputFilter()
+        debug_formatter = DebugOutputFormatter()
         debug_handler = None
+        cancel_event = threading.Event()
+        result_queue: queue.Queue[RoutedResponse | Exception] = queue.Queue(maxsize=1)
         if state.debug_enabled:
             self.ui.print_debug_header()
             def debug_handler(chunk: str) -> None:
-                filtered = debug_filter.transform(chunk)
-                if filtered:
-                    self.ui.debug_chunk(filtered)
+                formatted = debug_formatter.transform(chunk)
+                if formatted:
+                    self.ui.debug_chunk(formatted)
+
+        def worker() -> None:
+            try:
+                response = self.router.run(
+                    prompt,
+                    conversation=history[:-1],
+                    stream_handler=debug_handler,
+                    app_session_id=state.session.id,
+                    cancel_event=cancel_event,
+                )
+                result_queue.put(response)
+            except Exception as exc:  # pragma: no cover
+                result_queue.put(exc)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        interrupted = False
         with self.ui.working(self._working_message(prompt, state)):
-            response = self.router.run(
-                prompt,
-                conversation=history[:-1],
-                stream_handler=debug_handler,
-                app_session_id=state.session.id,
-            )
+            interrupted = self._monitor_running_turn(thread, cancel_event)
+
+        result = result_queue.get()
+        if isinstance(result, Exception):
+            raise result
+        response = result
         state.last_response = response
+
+        if interrupted or response.failure_reason == "interrupted":
+            state.draft_prompt = prompt
+            self.ui.print_warning(
+                "Request interrupted. Draft saved. Edit the prompt and press Enter, or use /continue or /discard."
+            )
+            return
 
         response_timestamp = datetime.now(UTC).isoformat()
         self.store.add_message(
@@ -332,7 +383,8 @@ class InteractiveChat:
             f" {last_model} | {cwd} | {branch} | "
             f"req {total_requests} | tok {total_tokens} | "
             f"local {totals['local_tokens'] or 0} | cloud {totals['cloud_tokens'] or 0} | "
-            f"session {session_id} "
+            f"session {session_id}"
+            f"{' | draft pending' if state.draft_prompt else ''} "
         )
 
     def _git_branch(self) -> str:
@@ -343,3 +395,28 @@ class InteractiveChat:
         if content.startswith("ref: "):
             return content.rsplit("/", 1)[-1]
         return content[:8]
+
+    def _monitor_running_turn(
+        self,
+        thread: threading.Thread,
+        cancel_event: threading.Event,
+    ) -> bool:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        interrupted = False
+        try:
+            tty.setcbreak(fd)
+            while thread.is_alive():
+                ready, _, _ = select.select([fd], [], [], 0.1)
+                if ready:
+                    char = os.read(fd, 1)
+                    if char == b"\x1b":
+                        cancel_event.set()
+                        interrupted = True
+                        break
+                time.sleep(0.02)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        thread.join()
+        return interrupted

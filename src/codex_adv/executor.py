@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Callable
 
@@ -24,6 +27,7 @@ class ExecutionResult:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
+    interrupted: bool
 
 
 class CodexExecutionError(RuntimeError):
@@ -51,9 +55,15 @@ def run_codex(
     profile: str,
     workdir: str | Path | None = None,
     settings: ExecutorSettings | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ExecutionResult:
     return _run_codex_command(
-        prompt, profile, workdir=workdir, session_id=None, settings=settings
+        prompt,
+        profile,
+        workdir=workdir,
+        session_id=None,
+        settings=settings,
+        cancel_event=cancel_event,
     )
 
 
@@ -62,9 +72,15 @@ def resume_codex(
     session_id: str,
     workdir: str | Path | None = None,
     settings: ExecutorSettings | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ExecutionResult:
     return _run_codex_command(
-        prompt, None, workdir=workdir, session_id=session_id, settings=settings
+        prompt,
+        None,
+        workdir=workdir,
+        session_id=session_id,
+        settings=settings,
+        cancel_event=cancel_event,
     )
 
 
@@ -75,46 +91,16 @@ def _run_codex_command(
     workdir: str | Path | None,
     session_id: str | None,
     settings: ExecutorSettings | None,
+    cancel_event: threading.Event | None,
 ) -> ExecutionResult:
-    ensure_codex_available()
-
-    with tempfile.NamedTemporaryFile(prefix="codex-adv-", suffix=".txt", delete=False) as handle:
-        output_path = Path(handle.name)
-
-    command = _build_command(
+    return _stream_codex_command(
         prompt,
         profile,
-        output_path,
+        workdir=workdir,
+        on_chunk=None,
         session_id=session_id,
-        settings=settings or ExecutorSettings(),
-    )
-    try:
-        started = time.perf_counter()
-        completed = subprocess.run(
-            command,
-            cwd=str(workdir) if workdir else None,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        latency = time.perf_counter() - started
-        final_output = _read_final_output(output_path, completed.stdout)
-        parsed_session_id = _extract_session_id(completed.stdout)
-    finally:
-        output_path.unlink(missing_ok=True)
-
-    return ExecutionResult(
-        profile=profile or "",
-        command=command,
-        stdout=final_output,
-        raw_output=completed.stdout,
-        stderr=completed.stderr,
-        exit_code=completed.returncode,
-        latency_seconds=latency,
-        session_id=parsed_session_id or session_id,
-        input_tokens=_extract_usage(completed.stdout)["input_tokens"],
-        output_tokens=_extract_usage(completed.stdout)["output_tokens"],
-        cached_input_tokens=_extract_usage(completed.stdout)["cached_input_tokens"],
+        settings=settings,
+        cancel_event=cancel_event,
     )
 
 
@@ -125,6 +111,7 @@ def stream_codex(
     workdir: str | Path | None = None,
     on_chunk: StreamHandler | None = None,
     settings: ExecutorSettings | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -133,6 +120,7 @@ def stream_codex(
         on_chunk=on_chunk,
         session_id=None,
         settings=settings,
+        cancel_event=cancel_event,
     )
 
 
@@ -143,6 +131,7 @@ def stream_resume_codex(
     workdir: str | Path | None = None,
     on_chunk: StreamHandler | None = None,
     settings: ExecutorSettings | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -151,6 +140,7 @@ def stream_resume_codex(
         on_chunk=on_chunk,
         session_id=session_id,
         settings=settings,
+        cancel_event=cancel_event,
     )
 
 
@@ -162,6 +152,7 @@ def _stream_codex_command(
     on_chunk: StreamHandler | None = None,
     session_id: str | None = None,
     settings: ExecutorSettings | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ExecutionResult:
     ensure_codex_available()
 
@@ -176,6 +167,7 @@ def _stream_codex_command(
         settings=settings or ExecutorSettings(),
     )
     started = time.perf_counter()
+    interrupted = False
     try:
         process = subprocess.Popen(
             command,
@@ -188,16 +180,35 @@ def _stream_codex_command(
 
         chunks: list[str] = []
         assert process.stdout is not None
-        for line in process.stdout:
-            chunks.append(line)
-            if on_chunk is not None:
-                on_chunk(line)
+        stdout_fd = process.stdout.fileno()
+
+        while True:
+            if cancel_event is not None and cancel_event.is_set() and process.poll() is None:
+                interrupted = True
+                process.terminate()
+            ready, _, _ = select.select([stdout_fd], [], [], 0.1)
+            if ready:
+                line = process.stdout.readline()
+                if line:
+                    chunks.append(line)
+                    if on_chunk is not None:
+                        on_chunk(line)
+            if process.poll() is not None:
+                # Drain remaining buffered lines after process exit.
+                remaining = process.stdout.read()
+                if remaining:
+                    chunks.append(remaining)
+                    if on_chunk is not None:
+                        on_chunk(remaining)
+                break
 
         process.stdout.close()
         exit_code = process.wait()
         latency = time.perf_counter() - started
-        stdout = _read_final_output(output_path, "".join(chunks))
-        parsed_session_id = _extract_session_id("".join(chunks))
+        raw_output = "".join(chunks)
+        stdout = _read_final_output(output_path, raw_output)
+        parsed_session_id = _extract_session_id(raw_output)
+        usage = _extract_usage(raw_output)
     finally:
         output_path.unlink(missing_ok=True)
 
@@ -205,14 +216,15 @@ def _stream_codex_command(
         profile=profile or "",
         command=command,
         stdout=stdout,
-        raw_output="".join(chunks),
+        raw_output=raw_output,
         stderr="",
         exit_code=exit_code,
         latency_seconds=latency,
         session_id=parsed_session_id or session_id,
-        input_tokens=_extract_usage("".join(chunks))["input_tokens"],
-        output_tokens=_extract_usage("".join(chunks))["output_tokens"],
-        cached_input_tokens=_extract_usage("".join(chunks))["cached_input_tokens"],
+        input_tokens=usage["input_tokens"],
+        output_tokens=usage["output_tokens"],
+        cached_input_tokens=usage["cached_input_tokens"],
+        interrupted=interrupted,
     )
 
 
