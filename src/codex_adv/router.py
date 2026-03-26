@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, UTC
 import threading
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from codex_adv.classifier import Classification, classify_prompt
 from codex_adv.config import AppConfig
@@ -358,6 +358,6 @@ class Router:
         try:
             value = message[field]  # type: ignore[index]
             return str(value)
-        except Exception:
-            pass
+        except (KeyError, IndexError, TypeError):
+            return str(getattr(message, field, ""))
         return str(getattr(message, field, ""))

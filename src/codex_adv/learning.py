@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import json
 import sqlite3
 import uuid
-
+from dataclasses import dataclass
+from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -54,7 +53,6 @@ CREATE TABLE IF NOT EXISTS requests (
 
 @dataclass(slots=True)
 class RequestRecord:
-    session_id: str
     timestamp: str
     prompt: str
     rewritten_prompt: str
@@ -65,11 +63,12 @@ class RequestRecord:
     success: bool
     latency: float
     token_estimate: int
-    actual_tokens_used: int
-    input_tokens: int
-    output_tokens: int
-    cached_input_tokens: int
     rewrite_strategy: str
+    session_id: str = ""
+    actual_tokens_used: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
     failure_reason: str = ""
 
 
@@ -113,25 +112,41 @@ class LearningStore:
         }
         if "local_exec_session_id" in columns and "local_fast_exec_session_id" not in columns:
             connection.execute(
-                "ALTER TABLE sessions ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''"
+                """
+                ALTER TABLE sessions
+                ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''
+                """
             )
             connection.execute(
-                "UPDATE sessions SET local_fast_exec_session_id = local_exec_session_id WHERE local_exec_session_id != ''"
+                """
+                UPDATE sessions
+                SET local_fast_exec_session_id = local_exec_session_id
+                WHERE local_exec_session_id != ''
+                """
             )
             columns.add("local_fast_exec_session_id")
         if "local_fast_exec_session_id" not in columns:
             connection.execute(
-                "ALTER TABLE sessions ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''"
+                """
+                ALTER TABLE sessions
+                ADD COLUMN local_fast_exec_session_id TEXT NOT NULL DEFAULT ''
+                """
             )
             columns.add("local_fast_exec_session_id")
         if "local_heavy_exec_session_id" not in columns:
             connection.execute(
-                "ALTER TABLE sessions ADD COLUMN local_heavy_exec_session_id TEXT NOT NULL DEFAULT ''"
+                """
+                ALTER TABLE sessions
+                ADD COLUMN local_heavy_exec_session_id TEXT NOT NULL DEFAULT ''
+                """
             )
             columns.add("local_heavy_exec_session_id")
         if "cloud_exec_session_id" not in columns:
             connection.execute(
-                "ALTER TABLE sessions ADD COLUMN cloud_exec_session_id TEXT NOT NULL DEFAULT ''"
+                """
+                ALTER TABLE sessions
+                ADD COLUMN cloud_exec_session_id TEXT NOT NULL DEFAULT ''
+                """
             )
 
     def _ensure_request_columns(self, connection: sqlite3.Connection) -> None:
@@ -210,10 +225,10 @@ class LearningStore:
             ).fetchone()
 
     def get_exec_session_id(self, session_id: str, route: str) -> str | None:
-        column = self._route_column(route)
+        query = self._route_select_query(route)
         with self._connect() as connection:
             row = connection.execute(
-                f"SELECT {column} FROM sessions WHERE id = ?",
+                query,
                 (session_id,),
             ).fetchone()
         if not row or not row[0]:
@@ -221,10 +236,10 @@ class LearningStore:
         return str(row[0])
 
     def set_exec_session_id(self, session_id: str, route: str, exec_session_id: str) -> None:
-        column = self._route_column(route)
+        query = self._route_update_query(route)
         with self._connect() as connection:
             connection.execute(
-                f"UPDATE sessions SET {column} = ? WHERE id = ?",
+                query,
                 (exec_session_id, session_id),
             )
 
@@ -286,6 +301,22 @@ class LearningStore:
                 (record.timestamp, record.session_id),
             )
 
+    def delete_last_message(self, session_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM messages
+                WHERE id = (
+                    SELECT id
+                    FROM messages
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                """,
+                (session_id,),
+            )
+
     def _route_column(self, route: str) -> str:
         if route == "local":
             return "local_fast_exec_session_id"
@@ -295,6 +326,24 @@ class LearningStore:
             return "local_heavy_exec_session_id"
         if route == "cloud":
             return "cloud_exec_session_id"
+        raise ValueError(f"Unknown route: {route}")
+
+    def _route_select_query(self, route: str) -> str:
+        if route in {"local", "local_fast"}:
+            return "SELECT local_fast_exec_session_id FROM sessions WHERE id = ?"
+        if route == "local_heavy":
+            return "SELECT local_heavy_exec_session_id FROM sessions WHERE id = ?"
+        if route == "cloud":
+            return "SELECT cloud_exec_session_id FROM sessions WHERE id = ?"
+        raise ValueError(f"Unknown route: {route}")
+
+    def _route_update_query(self, route: str) -> str:
+        if route in {"local", "local_fast"}:
+            return "UPDATE sessions SET local_fast_exec_session_id = ? WHERE id = ?"
+        if route == "local_heavy":
+            return "UPDATE sessions SET local_heavy_exec_session_id = ? WHERE id = ?"
+        if route == "cloud":
+            return "UPDATE sessions SET cloud_exec_session_id = ? WHERE id = ?"
         raise ValueError(f"Unknown route: {route}")
 
     def get_messages(self, session_id: str, limit: int | None = None) -> list[sqlite3.Row]:
@@ -431,12 +480,40 @@ class LearningStore:
                     COALESCE(SUM(output_tokens), 0) AS output_tokens,
                     COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
                     ROUND(COALESCE(AVG(latency), 0), 3) AS avg_latency,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN actual_tokens_used ELSE 0 END), 0) AS cloud_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN actual_tokens_used ELSE 0 END), 0) AS local_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN input_tokens ELSE 0 END), 0) AS cloud_input_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN output_tokens ELSE 0 END), 0) AS cloud_output_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN input_tokens ELSE 0 END), 0) AS local_input_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN output_tokens ELSE 0 END), 0) AS local_output_tokens
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN chosen_model LIKE 'cloud%' THEN actual_tokens_used
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS cloud_tokens,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN chosen_model LIKE 'local%' THEN actual_tokens_used
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS local_tokens,
+                    COALESCE(
+                        SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN input_tokens ELSE 0 END),
+                        0
+                    ) AS cloud_input_tokens,
+                    COALESCE(
+                        SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN output_tokens ELSE 0 END),
+                        0
+                    ) AS cloud_output_tokens,
+                    COALESCE(
+                        SUM(CASE WHEN chosen_model LIKE 'local%' THEN input_tokens ELSE 0 END),
+                        0
+                    ) AS local_input_tokens,
+                    COALESCE(
+                        SUM(CASE WHEN chosen_model LIKE 'local%' THEN output_tokens ELSE 0 END),
+                        0
+                    ) AS local_output_tokens
                 FROM requests
                 WHERE session_id = ?
                 """,

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-import os
-from pathlib import Path
 import re
 import select
 import shutil
@@ -11,7 +8,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -169,7 +168,7 @@ def _stream_codex_command(
     started = time.perf_counter()
     interrupted = False
     try:
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # nosec B603
             command,
             cwd=str(workdir) if workdir else None,
             text=True,
@@ -179,7 +178,8 @@ def _stream_codex_command(
         )
 
         chunks: list[str] = []
-        assert process.stdout is not None
+        if process.stdout is None:
+            raise CodexExecutionError("Failed to open stdout for Codex process.")
         stdout_fd = process.stdout.fileno()
 
         while True:
@@ -236,6 +236,11 @@ def _build_command(
     session_id: str | None,
     settings: ExecutorSettings,
 ) -> list[str]:
+    codex_path = shutil.which("codex")
+    if codex_path is None:
+        raise CodexExecutionError(
+            "Could not find `codex` on PATH. Install Codex CLI before running codex-adv."
+        )
     config_flags: list[str] = []
     if settings.web_search != "disabled":
         config_flags.extend(["-c", f'web_search="{settings.web_search}"'])
@@ -244,7 +249,7 @@ def _build_command(
 
     if session_id:
         return [
-            "codex",
+            codex_path,
             "exec",
             "resume",
             *config_flags,
@@ -259,7 +264,7 @@ def _build_command(
         raise ValueError("profile is required when no session_id is provided")
 
     return [
-        "codex",
+        codex_path,
         "exec",
         *config_flags,
         "--profile",

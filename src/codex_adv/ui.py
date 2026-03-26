@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import shutil
+from dataclasses import dataclass, field
 from typing import Any
+
 from prompt_toolkit.formatted_text import ANSI
 
 try:
+    from rich.box import ROUNDED
     from rich.console import Console
     from rich.panel import Panel
-    from rich.box import ROUNDED
     from rich.rule import Rule
     from rich.status import Status
     from rich.table import Table
@@ -86,6 +87,30 @@ class TerminalUI:
             )
             return
         print(help_text)
+
+    def print_interrupt_actions(self) -> None:
+        message = (
+            "Request interrupted.\n"
+            "[E]dit draft and run  [C]ontinue as-is  [D]iscard draft  [N]ew prompt"
+        )
+        if self.use_rich:
+            self.console.print(
+                Panel(
+                    message,
+                    title="Interrupted",
+                    border_style="yellow",
+                    style="white on rgb(20,18,16)",
+                    box=ROUNDED,
+                )
+            )
+            return
+        print(message)
+
+    def interrupt_prompt(self) -> str:
+        return ANSI("\x1b[93minterrupt> \x1b[0m") if self.use_rich else "interrupt> "
+
+    def edit_prompt(self) -> str:
+        return ANSI("\x1b[93medit> \x1b[0m") if self.use_rich else "edit> "
 
     def print_assistant_header(self, model: str) -> None:
         if self.use_rich:
@@ -198,12 +223,18 @@ class TerminalUI:
     def terminal_width(self) -> int:
         return shutil.get_terminal_size((100, 20)).columns
 
+    def clear_screen(self) -> None:
+        if self.use_rich:
+            self.console.clear()
+            return
+        print("\033[2J\033[H", end="", flush=True)
+
 
 class _NullStatus:
     def __init__(self, message: str) -> None:
         self.message = message
 
-    def __enter__(self) -> "_NullStatus":
+    def __enter__(self) -> _NullStatus:
         print(self.message)
         return self
 

@@ -98,6 +98,28 @@ Inside chat:
 /quit
 ```
 
+## Development checks
+
+Install the developer dependencies:
+
+```bash
+python3 -m pip install -e ".[dev]"
+```
+
+Run the full quality gate:
+
+```bash
+make check
+```
+
+Or run each part separately:
+
+```bash
+make lint
+make audit
+make test
+```
+
 ## Codex profiles
 
 The executor assumes two Codex profiles exist:

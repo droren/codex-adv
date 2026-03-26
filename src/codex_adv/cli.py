@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from codex_adv.chat import InteractiveChat
 from codex_adv.config import load_config

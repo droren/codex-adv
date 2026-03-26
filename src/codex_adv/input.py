@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import CompleteStyle
-
 
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("/help", "Show help"),
@@ -61,6 +60,10 @@ class ChatInput:
             reserve_space_for_menu=8,
             bottom_toolbar=bottom_toolbar,
         )
+        self.modal_session = PromptSession()
 
     def prompt(self, message: str, default: str = "") -> str:
         return self.session.prompt(message, default=default)
+
+    def modal_prompt(self, message: str, default: str = "") -> str:
+        return self.modal_session.prompt(message, default=default)

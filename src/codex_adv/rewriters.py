@@ -23,7 +23,8 @@ def rewrite_for_local(prompt: str, classification: Classification, style: str) -
 
 def rewrite_for_cloud(prompt: str, classification: Classification, style: str) -> RewriteResult:
     rewritten = (
-        "Break this into clear steps, keep the implementation complete, and prefer a high-success plan. "
+        "Break this into clear steps, keep the implementation complete, "
+        "and prefer a high-success plan. "
         "If code changes are needed, structure the work and return actionable output.\n\n"
         f"Task type: {classification.task_type}\n"
         f"Complexity: {classification.complexity_score}/5\n"

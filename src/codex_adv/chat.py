@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import os
-from pathlib import Path
 import queue
 import select
 import shlex
@@ -12,13 +9,15 @@ import termios
 import threading
 import time
 import tty
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 from codex_adv.debug import DebugOutputFormatter
 from codex_adv.input import ChatInput
 from codex_adv.learning import LearningStore, MessageRecord, SessionRecord
-from codex_adv.router import Router, RoutedResponse
+from codex_adv.router import RoutedResponse, Router
 from codex_adv.ui import TerminalUI
-
 
 HELP_TEXT = """Commands:
 /help                Show this help
@@ -37,6 +36,8 @@ HELP_TEXT = """Commands:
 /usage [detailed]    Show token/request usage for this session
 /route               Show details for the last routed turn
 /clear               Clear the screen
+
+Press ESC during a running request to interrupt and choose what to do with the draft.
 """
 
 
@@ -136,8 +137,9 @@ class InteractiveChat:
             if not state.draft_prompt:
                 self.ui.print_info("No saved draft to continue.")
                 return True
-            self._run_turn(state.draft_prompt, state)
+            draft = state.draft_prompt
             state.draft_prompt = ""
+            self._run_turn(draft, state)
             return True
         if command == "/discard":
             state.draft_prompt = ""
@@ -178,7 +180,11 @@ class InteractiveChat:
             )
             return True
         if command == "/usage":
-            detailed = len(parts) > 1 and parts[1].lower() in {"detailed", "detail", "full"}
+            detailed = len(parts) > 1 and parts[1].lower() in {
+                "detailed",
+                "detail",
+                "full",
+            }
             self._print_usage(state.session.id, detailed=detailed)
             return True
         if command == "/route":
@@ -226,7 +232,7 @@ class InteractiveChat:
             )
             return True
         if command == "/clear":
-            os.system("clear")
+            self.ui.clear_screen()
             return True
 
         self.ui.print_warning(f"Unknown command: {command}. Type /help for commands.")
@@ -281,10 +287,9 @@ class InteractiveChat:
         state.last_response = response
 
         if interrupted or response.failure_reason == "interrupted":
+            self.store.delete_last_message(state.session.id)
             state.draft_prompt = prompt
-            self.ui.print_warning(
-                "Request interrupted. Draft saved. Edit the prompt and press Enter, or use /continue or /discard."
-            )
+            self._handle_interrupted_turn(state)
             return
 
         response_timestamp = datetime.now(UTC).isoformat()
@@ -393,9 +398,13 @@ class InteractiveChat:
             "session total: "
             f"{totals['total_requests']} requests, "
             f"{totals['actual_tokens_used']} tokens, "
-            f"input={totals['input_tokens']}, output={totals['output_tokens']}, cached={totals['cached_input_tokens']}, "
-            f"local={totals['local_tokens']} (in={totals['local_input_tokens']}, out={totals['local_output_tokens']}), "
-            f"cloud={totals['cloud_tokens']} (in={totals['cloud_input_tokens']}, out={totals['cloud_output_tokens']})"
+            f"input={totals['input_tokens']}, "
+            f"output={totals['output_tokens']}, "
+            f"cached={totals['cached_input_tokens']}, "
+            f"local={totals['local_tokens']} "
+            f"(in={totals['local_input_tokens']}, out={totals['local_output_tokens']}), "
+            f"cloud={totals['cloud_tokens']} "
+            f"(in={totals['cloud_input_tokens']}, out={totals['cloud_output_tokens']})"
         )
 
     def _bottom_toolbar(self) -> str:
@@ -412,7 +421,14 @@ class InteractiveChat:
         total_tokens = totals["actual_tokens_used"] or 0
         local_tokens = totals["local_tokens"] or 0
         cloud_tokens = totals["cloud_tokens"] or 0
-        route = "web" if (state.last_response and state.last_response.classification.requires_web) else "local-first"
+        route = (
+            "web"
+            if (
+                state.last_response
+                and state.last_response.classification.requires_web
+            )
+            else "local-first"
+        )
         return (
             f" {last_model} | {cwd} | {branch} | {route} | "
             f"req {total_requests} | tok {total_tokens} | "
@@ -454,3 +470,59 @@ class InteractiveChat:
 
         thread.join()
         return interrupted
+
+    def _handle_interrupted_turn(self, state: ChatState) -> None:
+        self.ui.print_interrupt_actions()
+        while True:
+            try:
+                raw = self.input.modal_prompt(
+                    self.ui.interrupt_prompt(),
+                    default="e",
+                ).strip().lower()
+            except EOFError:
+                self.ui.print_info("Draft saved. Use /continue or edit it on the next prompt.")
+                return
+            except KeyboardInterrupt:
+                self.ui.print_info("Draft saved. Use /continue or edit it on the next prompt.")
+                return
+
+            choice = raw[:1] if raw else "e"
+            if choice == "e":
+                self._edit_and_run_draft(state)
+                return
+            if choice == "c":
+                if not state.draft_prompt:
+                    self.ui.print_info("No saved draft to continue.")
+                    return
+                draft = state.draft_prompt
+                state.draft_prompt = ""
+                self._run_turn(draft, state)
+                return
+            if choice == "d":
+                state.draft_prompt = ""
+                self.ui.print_info("Draft discarded.")
+                return
+            if choice == "n":
+                self.ui.print_info("Draft kept. Enter a new prompt when ready, or use /discard.")
+                return
+            self.ui.print_warning("Choose E, C, D, or N.")
+
+    def _edit_and_run_draft(self, state: ChatState) -> None:
+        try:
+            edited = self.input.modal_prompt(
+                self.ui.edit_prompt(),
+                default=state.draft_prompt,
+            ).strip()
+        except EOFError:
+            self.ui.print_info("Draft saved. Use /continue or edit it on the next prompt.")
+            return
+        except KeyboardInterrupt:
+            self.ui.print_info("Draft saved. Use /continue or edit it on the next prompt.")
+            return
+
+        if not edited:
+            self.ui.print_info("Draft left unchanged. Use /continue or edit it later.")
+            return
+
+        state.draft_prompt = ""
+        self._run_turn(edited, state)

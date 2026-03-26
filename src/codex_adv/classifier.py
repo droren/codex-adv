@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 
 @dataclass(slots=True)
@@ -86,19 +86,53 @@ def classify_prompt(prompt: str) -> Classification:
         task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
     elif any(
         keyword in lowered
-        for keyword in ("create", "build", "implement", "generate", "skapa", "bygg", "implementera", "generera")
+        for keyword in (
+            "create",
+            "build",
+            "implement",
+            "generate",
+            "skapa",
+            "bygg",
+            "implementera",
+            "generera",
+        )
     ) and any(
         keyword in lowered
-        for keyword in ("app", "website", "script", "program", "tool", "webbplats", "skript", "program", "verktyg")
+        for keyword in (
+            "app",
+            "website",
+            "script",
+            "program",
+            "tool",
+            "webbplats",
+            "skript",
+            "program",
+            "verktyg",
+        )
     ):
         task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
-    elif any(keyword in lowered for keyword in ("test", "pytest", "unit test", "tester", "enhetstest")):
+    elif any(
+        keyword in lowered
+        for keyword in ("test", "pytest", "unit test", "tester", "enhetstest")
+    ):
         task_type = "test_help" if complexity_score <= 3 else "multi_file_edit"
-    elif any(keyword in lowered for keyword in ("refactor", "backend", "module", "refaktorera", "modul")):
+    elif any(
+        keyword in lowered
+        for keyword in ("refactor", "backend", "module", "refaktorera", "modul")
+    ):
         task_type = "large_refactor" if complexity_score >= 4 else "single_file_edit"
     elif any(keyword in lowered for keyword in ("fix", "bug", "error", "fel", "bugg")):
         task_type = "small_fix" if complexity_score <= 3 else "multi_file_edit"
-    elif any(keyword in lowered for keyword in ("design", "architecture", "system", "arkitektur", "systemdesign")):
+    elif any(
+        keyword in lowered
+        for keyword in (
+            "design",
+            "architecture",
+            "system",
+            "arkitektur",
+            "systemdesign",
+        )
+    ):
         task_type = "architecture"
     else:
         task_type = "unknown"
