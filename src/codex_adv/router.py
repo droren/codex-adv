@@ -121,6 +121,9 @@ class Router:
             failure_reason=failure_reason if success is False else first_failure_reason,
             latency=final_result.latency_seconds,
             actual_tokens_used=final_result.input_tokens + final_result.output_tokens,
+            input_tokens=final_result.input_tokens,
+            output_tokens=final_result.output_tokens,
+            cached_input_tokens=final_result.cached_input_tokens,
         )
 
         combined_output = final_result.stdout.strip() or final_result.stderr.strip()
@@ -295,6 +298,9 @@ class Router:
         failure_reason: str,
         latency: float,
         actual_tokens_used: int,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int,
     ) -> None:
         self.store.log_request(
             RequestRecord(
@@ -310,6 +316,9 @@ class Router:
                 latency=latency,
                 token_estimate=classification.token_estimate,
                 actual_tokens_used=actual_tokens_used,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
                 rewrite_strategy=rewrite.strategy,
                 failure_reason=failure_reason,
             )

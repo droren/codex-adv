@@ -34,7 +34,7 @@ HELP_TEXT = """Commands:
 /sessions            List recent sessions
 /history [n]         Show messages in this session
 /stats               Show routing stats
-/usage               Show token/request usage for this session
+/usage [detailed]    Show token/request usage for this session
 /route               Show details for the last routed turn
 /clear               Clear the screen
 """
@@ -178,7 +178,8 @@ class InteractiveChat:
             )
             return True
         if command == "/usage":
-            self._print_usage(state.session.id)
+            detailed = len(parts) > 1 and parts[1].lower() in {"detailed", "detail", "full"}
+            self._print_usage(state.session.id, detailed=detailed)
             return True
         if command == "/route":
             self._print_last_route(state.last_response)
@@ -339,32 +340,62 @@ class InteractiveChat:
         task = "local-first routing"
         return f"{task} for session {state.session.id[:8]}..."
 
-    def _print_usage(self, session_id: str) -> None:
+    def _print_usage(self, session_id: str, detailed: bool = False) -> None:
         totals = self.store.session_usage_totals(session_id)
         rows = self.store.session_usage(session_id)
         if totals["total_requests"] == 0:
             self.ui.print_info("No usage yet in this session.")
             return
 
-        table_rows = [
-            (
-                str(row["chosen_model"]),
-                str(row["total_requests"]),
-                str(row["actual_tokens_used"] or 0),
-                str(row["avg_latency"]),
-                str(row["fallbacks"]),
+        if detailed:
+            table_rows = [
+                (
+                    str(row["chosen_model"]),
+                    str(row["total_requests"]),
+                    str(row["input_tokens"] or 0),
+                    str(row["output_tokens"] or 0),
+                    str(row["cached_input_tokens"] or 0),
+                    str(row["actual_tokens_used"] or 0),
+                    str(row["avg_latency"]),
+                    str(row["fallbacks"]),
+                )
+                for row in rows
+            ]
+            self.ui.print_stats(
+                (
+                    "model",
+                    "requests",
+                    "input",
+                    "output",
+                    "cached",
+                    "total",
+                    "avg_latency",
+                    "fallbacks",
+                ),
+                table_rows,
             )
-            for row in rows
-        ]
-        self.ui.print_stats(
-            ("model", "requests", "tokens", "avg_latency", "fallbacks"),
-            table_rows,
-        )
+        else:
+            table_rows = [
+                (
+                    str(row["chosen_model"]),
+                    str(row["total_requests"]),
+                    str(row["actual_tokens_used"] or 0),
+                    str(row["avg_latency"]),
+                    str(row["fallbacks"]),
+                )
+                for row in rows
+            ]
+            self.ui.print_stats(
+                ("model", "requests", "tokens", "avg_latency", "fallbacks"),
+                table_rows,
+            )
         self.ui.print_info(
             "session total: "
             f"{totals['total_requests']} requests, "
             f"{totals['actual_tokens_used']} tokens, "
-            f"local={totals['local_tokens']}, cloud={totals['cloud_tokens']}"
+            f"input={totals['input_tokens']}, output={totals['output_tokens']}, cached={totals['cached_input_tokens']}, "
+            f"local={totals['local_tokens']} (in={totals['local_input_tokens']}, out={totals['local_output_tokens']}), "
+            f"cloud={totals['cloud_tokens']} (in={totals['cloud_input_tokens']}, out={totals['cloud_output_tokens']})"
         )
 
     def _bottom_toolbar(self) -> str:
@@ -379,10 +410,13 @@ class InteractiveChat:
         last_model = state.last_response.final_model if state.last_response else "idle"
         total_requests = totals["total_requests"] or 0
         total_tokens = totals["actual_tokens_used"] or 0
+        local_tokens = totals["local_tokens"] or 0
+        cloud_tokens = totals["cloud_tokens"] or 0
+        route = "web" if (state.last_response and state.last_response.classification.requires_web) else "local-first"
         return (
-            f" {last_model} | {cwd} | {branch} | "
+            f" {last_model} | {cwd} | {branch} | {route} | "
             f"req {total_requests} | tok {total_tokens} | "
-            f"local {totals['local_tokens'] or 0} | cloud {totals['cloud_tokens'] or 0} | "
+            f"local {local_tokens} | cloud {cloud_tokens} | "
             f"session {session_id}"
             f"{' | draft pending' if state.draft_prompt else ''} "
         )

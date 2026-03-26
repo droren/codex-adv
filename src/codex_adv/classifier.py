@@ -34,6 +34,15 @@ def classify_prompt(prompt: str) -> Classification:
             "latest headlines",
             "online",
             "on the web",
+            "senaste nyheterna",
+            "aktuella nyheter",
+            "senaste ai-nyheterna",
+            "senaste ai nyheterna",
+            "sök på webben",
+            "sök efter",
+            "leta upp",
+            "på webben",
+            "vad händer",
         )
     )
 
@@ -47,28 +56,49 @@ def classify_prompt(prompt: str) -> Classification:
         for keyword in ("architecture", "system", "design", "multi-file", "rewrite")
     ):
         complexity_score += 2
+    if any(
+        keyword in lowered
+        for keyword in ("arkitektur", "systemdesign", "flerfils", "skriv om")
+    ):
+        complexity_score += 2
     if any(keyword in lowered for keyword in ("tests", "refactor", "backend")):
+        complexity_score += 1
+    if any(keyword in lowered for keyword in ("tester", "refaktorera", "backend")):
         complexity_score += 1
     if any(keyword in lowered for keyword in ("game", "tetris", "app", "website", "ui")):
         complexity_score += 2
+    if any(
+        keyword in lowered
+        for keyword in ("spel", "tetrisspel", "app", "webbplats", "gränssnitt")
+    ):
+        complexity_score += 2
     if any(keyword in lowered for keyword in ("create", "build", "implement", "generate")):
         complexity_score += 1
+    if any(keyword in lowered for keyword in ("skapa", "bygg", "implementera", "generera")):
+        complexity_score += 1
 
-    if any(keyword in lowered for keyword in ("explain", "summarize", "what does")):
+    if any(
+        keyword in lowered
+        for keyword in ("explain", "summarize", "what does", "förklara", "sammanfatta", "vad gör")
+    ):
         task_type = "explain"
-    elif any(keyword in lowered for keyword in ("game", "tetris")):
+    elif any(keyword in lowered for keyword in ("game", "tetris", "spel", "tetrisspel")):
         task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
-    elif any(keyword in lowered for keyword in ("create", "build", "implement", "generate")) and any(
-        keyword in lowered for keyword in ("app", "website", "script", "program", "tool")
+    elif any(
+        keyword in lowered
+        for keyword in ("create", "build", "implement", "generate", "skapa", "bygg", "implementera", "generera")
+    ) and any(
+        keyword in lowered
+        for keyword in ("app", "website", "script", "program", "tool", "webbplats", "skript", "program", "verktyg")
     ):
         task_type = "large_refactor" if complexity_score >= 3 else "single_file_edit"
-    elif any(keyword in lowered for keyword in ("test", "pytest", "unit test")):
+    elif any(keyword in lowered for keyword in ("test", "pytest", "unit test", "tester", "enhetstest")):
         task_type = "test_help" if complexity_score <= 3 else "multi_file_edit"
-    elif any(keyword in lowered for keyword in ("refactor", "backend", "module")):
+    elif any(keyword in lowered for keyword in ("refactor", "backend", "module", "refaktorera", "modul")):
         task_type = "large_refactor" if complexity_score >= 4 else "single_file_edit"
-    elif any(keyword in lowered for keyword in ("fix", "bug", "error")):
+    elif any(keyword in lowered for keyword in ("fix", "bug", "error", "fel", "bugg")):
         task_type = "small_fix" if complexity_score <= 3 else "multi_file_edit"
-    elif any(keyword in lowered for keyword in ("design", "architecture", "system")):
+    elif any(keyword in lowered for keyword in ("design", "architecture", "system", "arkitektur", "systemdesign")):
         task_type = "architecture"
     else:
         task_type = "unknown"

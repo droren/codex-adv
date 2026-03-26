@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS requests (
     latency REAL NOT NULL,
     token_estimate INTEGER NOT NULL,
     actual_tokens_used INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
     rewrite_strategy TEXT NOT NULL DEFAULT '',
     failure_reason TEXT NOT NULL DEFAULT ''
 );
@@ -63,6 +66,9 @@ class RequestRecord:
     latency: float
     token_estimate: int
     actual_tokens_used: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
     rewrite_strategy: str
     failure_reason: str = ""
 
@@ -140,6 +146,18 @@ class LearningStore:
         if "actual_tokens_used" not in columns:
             connection.execute(
                 "ALTER TABLE requests ADD COLUMN actual_tokens_used INTEGER NOT NULL DEFAULT 0"
+            )
+        if "input_tokens" not in columns:
+            connection.execute(
+                "ALTER TABLE requests ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        if "output_tokens" not in columns:
+            connection.execute(
+                "ALTER TABLE requests ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        if "cached_input_tokens" not in columns:
+            connection.execute(
+                "ALTER TABLE requests ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"
             )
 
     def create_session(self, title: str, timestamp: str) -> SessionRecord:
@@ -312,10 +330,13 @@ class LearningStore:
                     latency,
                     token_estimate,
                     actual_tokens_used,
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
                     rewrite_strategy,
                     failure_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.session_id,
@@ -330,6 +351,9 @@ class LearningStore:
                     record.latency,
                     record.token_estimate,
                     record.actual_tokens_used,
+                    record.input_tokens,
+                    record.output_tokens,
+                    record.cached_input_tokens,
                     record.rewrite_strategy,
                     record.failure_reason,
                 ),
@@ -363,7 +387,10 @@ class LearningStore:
                     ROUND(AVG(success), 3) AS success_rate,
                     ROUND(AVG(latency), 3) AS avg_latency,
                     SUM(fallback_used) AS fallbacks,
-                    SUM(actual_tokens_used) AS actual_tokens_used
+                    SUM(actual_tokens_used) AS actual_tokens_used,
+                    SUM(input_tokens) AS input_tokens,
+                    SUM(output_tokens) AS output_tokens,
+                    SUM(cached_input_tokens) AS cached_input_tokens
                 FROM requests
                 GROUP BY chosen_model, task_type
                 ORDER BY total_requests DESC, chosen_model, task_type
@@ -379,6 +406,9 @@ class LearningStore:
                     chosen_model,
                     COUNT(*) AS total_requests,
                     SUM(actual_tokens_used) AS actual_tokens_used,
+                    SUM(input_tokens) AS input_tokens,
+                    SUM(output_tokens) AS output_tokens,
+                    SUM(cached_input_tokens) AS cached_input_tokens,
                     ROUND(AVG(latency), 3) AS avg_latency,
                     SUM(fallback_used) AS fallbacks
                 FROM requests
@@ -397,9 +427,16 @@ class LearningStore:
                 SELECT
                     COUNT(*) AS total_requests,
                     COALESCE(SUM(actual_tokens_used), 0) AS actual_tokens_used,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
                     ROUND(COALESCE(AVG(latency), 0), 3) AS avg_latency,
                     COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN actual_tokens_used ELSE 0 END), 0) AS cloud_tokens,
-                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN actual_tokens_used ELSE 0 END), 0) AS local_tokens
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN actual_tokens_used ELSE 0 END), 0) AS local_tokens,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN input_tokens ELSE 0 END), 0) AS cloud_input_tokens,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'cloud%' THEN output_tokens ELSE 0 END), 0) AS cloud_output_tokens,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN input_tokens ELSE 0 END), 0) AS local_input_tokens,
+                    COALESCE(SUM(CASE WHEN chosen_model LIKE 'local%' THEN output_tokens ELSE 0 END), 0) AS local_output_tokens
                 FROM requests
                 WHERE session_id = ?
                 """,

@@ -28,7 +28,7 @@ class DebugOutputFormatter:
             thread_id = event.get("thread_id", "")
             return f"session: {thread_id}\n" if thread_id else ""
         if event_type == "turn.started":
-            return "turn: started\n"
+            return self._format_turn_started(event)
         if event_type == "turn.completed":
             usage = event.get("usage", {})
             if isinstance(usage, dict):
@@ -46,6 +46,19 @@ class DebugOutputFormatter:
             item = event.get("item", {})
             return self._format_item_completed(item)
         return ""
+
+    def _format_turn_started(self, event: dict[str, object]) -> str:
+        parts: list[str] = ["turn: started"]
+        cwd = str(event.get("cwd", "")).strip()
+        if cwd:
+            parts.append(f"cwd={cwd}")
+        model = str(event.get("model", "")).strip()
+        if model:
+            parts.append(f"model={model}")
+        provider = str(event.get("provider", "")).strip()
+        if provider:
+            parts.append(f"provider={provider}")
+        return " | ".join(parts) + "\n"
 
     def _format_item_started(self, item: object) -> str:
         if not isinstance(item, dict):
@@ -74,6 +87,9 @@ class DebugOutputFormatter:
             text = str(item.get("text", "")).strip()
             summary = self._first_meaningful_line(text)
             return f"reasoning: {summary}\n" if summary else ""
+        if item_type == "command_execution":
+            command = self._command_from_item(item)
+            return f"exec: {command}\n" if command else "exec: running command\n"
         if item_type == "agent_message":
             text = str(item.get("text", "")).strip()
             tool_call = self._extract_tool_call(text)
@@ -99,12 +115,28 @@ class DebugOutputFormatter:
             return f"{stripped}\n"
         if stripped.startswith("[router]"):
             return f"{stripped}\n"
+        if stripped.startswith("exec"):
+            return f"{stripped}\n"
         return ""
 
     def _extract_tool_call(self, text: str) -> str | None:
         match = re.search(r'"name"\s*:\s*"exec_command".*?"cmd"\s*:\s*"([^"]+)"', text)
         if match:
             return f"exec: {match.group(1)}"
+        return None
+
+    def _command_from_item(self, item: dict[str, object]) -> str | None:
+        action = item.get("action")
+        if isinstance(action, dict):
+            command = action.get("command")
+            if command:
+                return str(command)
+        command = item.get("command")
+        if command:
+            return str(command)
+        text = str(item.get("text", "")).strip()
+        if text:
+            return self._truncate(self._first_meaningful_line(text), 180)
         return None
 
     def _first_meaningful_line(self, text: str) -> str:
