@@ -15,6 +15,7 @@ from codex_adv.executor import (
     stream_codex,
     stream_resume_codex,
 )
+from codex_adv.intent import IntentPlan, analyze_intent, should_analyze_intent
 from codex_adv.learning import LearningStore, RequestRecord
 from codex_adv.rewriters import RewriteResult, rewrite_for_cloud, rewrite_for_local
 
@@ -48,6 +49,14 @@ class Router:
         cancel_event: threading.Event | None = None,
     ) -> RoutedResponse:
         classification = classify_prompt(prompt)
+        clarification_plan = self._clarification_plan_for(prompt, classification)
+        if clarification_plan is not None:
+            return self._clarification_response(
+                prompt,
+                classification,
+                clarification_plan=clarification_plan,
+                app_session_id=app_session_id or "",
+            )
         initial_model = self._choose_model(classification)
         routed_prompt = self._with_conversation_context(prompt, conversation)
 
@@ -140,6 +149,76 @@ class Router:
             rewrite_strategy=final_rewrite.strategy,
             latency_seconds=final_result.latency_seconds,
         )
+
+    def _clarification_response(
+        self,
+        prompt: str,
+        classification: Classification,
+        *,
+        clarification_plan: IntentPlan,
+        app_session_id: str,
+    ) -> RoutedResponse:
+        options = "\n".join(
+            f"{index}. {option}"
+            for index, option in enumerate(
+                clarification_plan.options[:3],
+                start=1,
+            )
+        )
+        output = (
+            "I can investigate this, but the request is still broad after normalization.\n\n"
+            f"Normalized intent:\n{clarification_plan.normalized_intent}\n\n"
+            "Pick one direction so I don't optimize the wrong thing:\n"
+            f"{options}\n\n"
+            "Reply with 1, 2, or 3, or rewrite the request with the focus you want."
+        )
+        self._log(
+            session_id=app_session_id,
+            prompt=prompt,
+            classification=classification,
+            model="router",
+            rewrite=RewriteResult(
+                rewritten_prompt=clarification_plan.normalized_intent,
+                strategy="clarify",
+            ),
+            fallback_used=False,
+            success=True,
+            failure_reason=clarification_plan.reason or "needs_clarification",
+            latency=0.0,
+            actual_tokens_used=0,
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+        )
+        return RoutedResponse(
+            output=output,
+            raw_output="",
+            classification=classification,
+            initial_model="router",
+            final_model="router",
+            fallback_used=False,
+            success=True,
+            failure_reason="needs_clarification",
+            rewritten_prompt=clarification_plan.normalized_intent,
+            rewrite_strategy="clarify",
+            latency_seconds=0.0,
+        )
+
+    def _clarification_plan_for(
+        self,
+        prompt: str,
+        classification: Classification,
+    ) -> IntentPlan | None:
+        if not should_analyze_intent(prompt, classification):
+            return None
+        plan = analyze_intent(
+            prompt,
+            classification,
+            profile=self.config.profiles.local_fast,
+        )
+        if plan is None or not plan.needs_clarification or not plan.options:
+            return None
+        return plan
 
     def _execute(
         self,

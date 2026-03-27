@@ -56,6 +56,7 @@ def run_codex(
     workdir: str | Path | None = None,
     settings: ExecutorSettings | None = None,
     cancel_event: threading.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> ExecutionResult:
     return _run_codex_command(
         prompt,
@@ -64,6 +65,7 @@ def run_codex(
         session_id=None,
         settings=settings,
         cancel_event=cancel_event,
+        output_schema=output_schema,
     )
 
 
@@ -73,6 +75,7 @@ def resume_codex(
     workdir: str | Path | None = None,
     settings: ExecutorSettings | None = None,
     cancel_event: threading.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> ExecutionResult:
     return _run_codex_command(
         prompt,
@@ -81,6 +84,7 @@ def resume_codex(
         session_id=session_id,
         settings=settings,
         cancel_event=cancel_event,
+        output_schema=output_schema,
     )
 
 
@@ -92,6 +96,7 @@ def _run_codex_command(
     session_id: str | None,
     settings: ExecutorSettings | None,
     cancel_event: threading.Event | None,
+    output_schema: dict[str, object] | None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -101,6 +106,7 @@ def _run_codex_command(
         session_id=session_id,
         settings=settings,
         cancel_event=cancel_event,
+        output_schema=output_schema,
     )
 
 
@@ -112,6 +118,7 @@ def stream_codex(
     on_chunk: StreamHandler | None = None,
     settings: ExecutorSettings | None = None,
     cancel_event: threading.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -121,6 +128,7 @@ def stream_codex(
         session_id=None,
         settings=settings,
         cancel_event=cancel_event,
+        output_schema=output_schema,
     )
 
 
@@ -132,6 +140,7 @@ def stream_resume_codex(
     on_chunk: StreamHandler | None = None,
     settings: ExecutorSettings | None = None,
     cancel_event: threading.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> ExecutionResult:
     return _stream_codex_command(
         prompt,
@@ -141,6 +150,7 @@ def stream_resume_codex(
         session_id=session_id,
         settings=settings,
         cancel_event=cancel_event,
+        output_schema=output_schema,
     )
 
 
@@ -153,11 +163,23 @@ def _stream_codex_command(
     session_id: str | None = None,
     settings: ExecutorSettings | None = None,
     cancel_event: threading.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> ExecutionResult:
     ensure_codex_available()
 
     with tempfile.NamedTemporaryFile(prefix="codex-adv-", suffix=".txt", delete=False) as handle:
         output_path = Path(handle.name)
+    schema_path: Path | None = None
+    if output_schema is not None:
+        with tempfile.NamedTemporaryFile(
+            prefix="codex-adv-schema-",
+            suffix=".json",
+            mode="w",
+            encoding="utf-8",
+            delete=False,
+        ) as handle:
+            json.dump(output_schema, handle)
+            schema_path = Path(handle.name)
 
     command = _build_command(
         prompt,
@@ -165,6 +187,7 @@ def _stream_codex_command(
         output_path,
         session_id=session_id,
         settings=settings or ExecutorSettings(),
+        schema_path=schema_path,
     )
     started = time.perf_counter()
     interrupted = False
@@ -212,6 +235,8 @@ def _stream_codex_command(
         usage = _extract_usage(raw_output)
     finally:
         output_path.unlink(missing_ok=True)
+        if schema_path is not None:
+            schema_path.unlink(missing_ok=True)
 
     return ExecutionResult(
         profile=profile or "",
@@ -236,6 +261,7 @@ def _build_command(
     *,
     session_id: str | None,
     settings: ExecutorSettings,
+    schema_path: Path | None,
 ) -> list[str]:
     codex_path = shutil.which("codex")
     if codex_path is None:
@@ -249,6 +275,8 @@ def _build_command(
         config_flags.append("--dangerously-bypass-approvals-and-sandbox")
     if settings.ephemeral_codex_sessions:
         config_flags.append("--ephemeral")
+    if schema_path is not None:
+        config_flags.extend(["--output-schema", str(schema_path)])
 
     if session_id:
         return [
