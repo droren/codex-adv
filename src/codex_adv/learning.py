@@ -104,6 +104,7 @@ class LearningStore:
             connection.executescript(SCHEMA)
             self._ensure_session_columns(connection)
             self._ensure_request_columns(connection)
+            self._backfill_usage_columns(connection)
 
     def _ensure_session_columns(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -174,6 +175,17 @@ class LearningStore:
             connection.execute(
                 "ALTER TABLE requests ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"
             )
+
+    def _backfill_usage_columns(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            UPDATE requests
+            SET input_tokens = actual_tokens_used
+            WHERE actual_tokens_used > 0
+              AND input_tokens = 0
+              AND output_tokens = 0
+            """
+        )
 
     def create_session(self, title: str, timestamp: str) -> SessionRecord:
         session = SessionRecord(

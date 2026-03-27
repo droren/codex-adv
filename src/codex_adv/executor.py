@@ -40,6 +40,7 @@ StreamHandler = Callable[[str], None]
 class ExecutorSettings:
     web_search: str = "disabled"
     dangerous_bypass_approvals_and_sandbox: bool = False
+    ephemeral_codex_sessions: bool = True
 
 
 def ensure_codex_available() -> None:
@@ -246,6 +247,8 @@ def _build_command(
         config_flags.extend(["-c", f'web_search="{settings.web_search}"'])
     if settings.dangerous_bypass_approvals_and_sandbox:
         config_flags.append("--dangerously-bypass-approvals-and-sandbox")
+    if settings.ephemeral_codex_sessions:
+        config_flags.append("--ephemeral")
 
     if session_id:
         return [

@@ -65,6 +65,27 @@ def classify_prompt(prompt: str) -> Classification:
         complexity_score += 1
     if any(keyword in lowered for keyword in ("tester", "refaktorera", "backend")):
         complexity_score += 1
+    if any(
+        keyword in lowered
+        for keyword in (
+            "memory",
+            "ram",
+            "machine",
+            "local machine",
+            "system",
+            "disk usage",
+            "processes",
+            "installed packages",
+            "minne",
+            "lokala maskin",
+            "den här maskinen",
+            "minnesförbrukning",
+            "minneskonsumtion",
+            "processer",
+            "installerade paket",
+        )
+    ):
+        complexity_score += 2
     if any(keyword in lowered for keyword in ("game", "tetris", "app", "website", "ui")):
         complexity_score += 2
     if any(
@@ -134,6 +155,27 @@ def classify_prompt(prompt: str) -> Classification:
         )
     ):
         task_type = "architecture"
+    elif any(
+        keyword in lowered
+        for keyword in (
+            "memory",
+            "ram",
+            "local machine",
+            "machine",
+            "system memory",
+            "disk usage",
+            "processes",
+            "installed packages",
+            "minne",
+            "den här maskinen",
+            "lokala maskin",
+            "minnesförbrukning",
+            "minneskonsumtion",
+            "processer",
+            "installerade paket",
+        )
+    ):
+        task_type = "system_inspection"
     else:
         task_type = "unknown"
 

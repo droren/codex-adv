@@ -21,6 +21,8 @@ min_output_chars = 40
 [execution]
 web_search = "disabled"
 dangerous_bypass_approvals_and_sandbox = false
+ephemeral_codex_sessions = true
+reuse_codex_sessions = false
 
 [rewrites.local]
 style = "compress"

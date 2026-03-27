@@ -57,6 +57,8 @@ class RewriteStyleConfig:
 class ExecutionConfig:
     web_search: str = "disabled"
     dangerous_bypass_approvals_and_sandbox: bool = False
+    ephemeral_codex_sessions: bool = True
+    reuse_codex_sessions: bool = False
 
 
 @dataclass(slots=True)
@@ -180,6 +182,18 @@ def load_config(config_path: str | Path | None) -> AppConfig:
                 execution_data.get(
                     "dangerous_bypass_approvals_and_sandbox",
                     DEFAULT_CONFIG.execution.dangerous_bypass_approvals_and_sandbox,
+                )
+            ),
+            ephemeral_codex_sessions=bool(
+                execution_data.get(
+                    "ephemeral_codex_sessions",
+                    DEFAULT_CONFIG.execution.ephemeral_codex_sessions,
+                )
+            ),
+            reuse_codex_sessions=bool(
+                execution_data.get(
+                    "reuse_codex_sessions",
+                    DEFAULT_CONFIG.execution.reuse_codex_sessions,
                 )
             ),
         ),

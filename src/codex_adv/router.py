@@ -151,6 +151,24 @@ class Router:
         stream_handler: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ExecutionResult:
+        if not self.config.execution.reuse_codex_sessions:
+            return (
+                stream_codex(
+                    prompt,
+                    profile,
+                    on_chunk=stream_handler,
+                    settings=self._executor_settings(),
+                    cancel_event=cancel_event,
+                )
+                if stream_handler is not None
+                else run_codex(
+                    prompt,
+                    profile,
+                    settings=self._executor_settings(),
+                    cancel_event=cancel_event,
+                )
+            )
+
         existing_session_id = (
             self.store.get_exec_session_id(app_session_id, route)
             if app_session_id is not None
@@ -220,6 +238,8 @@ class Router:
         task_type = classification.task_type
         if classification.requires_web:
             return "cloud"
+        if task_type == "system_inspection":
+            return "local_heavy"
         if task_type in {"unknown", "explain"}:
             return "local_fast"
         if task_type in self.config.routing.prefer_local_task_types:
@@ -250,10 +270,16 @@ class Router:
                 return False, "interrupted"
             return False, f"codex exited with {result.exit_code}"
 
+        if classification.task_type == "system_inspection" and not self._has_tool_activity(result):
+            return False, "missing_tool_activity"
+
         output = result.stdout.strip()
         min_output_chars = self._min_output_chars(classification)
         if len(output) < min_output_chars:
             return False, "output_too_short"
+
+        if self._looks_like_fake_execution(output) and not self._has_tool_activity(result):
+            return False, "missing_tool_activity"
 
         for marker in self.config.fallback.failure_markers:
             if marker.lower() in output.lower():
@@ -264,9 +290,32 @@ class Router:
     def _min_output_chars(self, classification: Classification) -> int:
         if classification.task_type in {"unknown", "explain"}:
             return 1
+        if classification.task_type == "system_inspection":
+            return min(20, self.config.fallback.min_output_chars)
         if classification.task_type in {"small_fix", "test_help"}:
             return min(20, self.config.fallback.min_output_chars)
         return self.config.fallback.min_output_chars
+
+    def _has_tool_activity(self, result: ExecutionResult) -> bool:
+        markers = (
+            '"type":"command_execution"',
+            '"name":"exec_command"',
+            "/bin/zsh -lc",
+            '"type":"web_search"',
+        )
+        return any(marker in result.raw_output for marker in markers)
+
+    def _looks_like_fake_execution(self, output: str) -> bool:
+        lowered = output.lower()
+        suspicious_phrases = (
+            "let's try this again",
+            "it seems there was an issue",
+            "i'll run this command",
+            "will execute this now",
+            "i will execute this now",
+            "let me know if you have any other requests while i retrieve this information",
+        )
+        return any(phrase in lowered for phrase in suspicious_phrases)
 
     def _profile_for_route(self, route: str) -> str:
         if route == "local_fast":
@@ -283,6 +332,7 @@ class Router:
             dangerous_bypass_approvals_and_sandbox=(
                 self.config.execution.dangerous_bypass_approvals_and_sandbox
             ),
+            ephemeral_codex_sessions=self.config.execution.ephemeral_codex_sessions,
         )
 
     def _log(
