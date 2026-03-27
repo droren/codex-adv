@@ -17,6 +17,7 @@ from codex_adv.debug import DebugOutputFormatter
 from codex_adv.input import ChatInput
 from codex_adv.learning import LearningStore, MessageRecord, SessionRecord
 from codex_adv.router import RoutedResponse, Router
+from codex_adv.self_heal import CrashContext, SelfHealingManager
 from codex_adv.ui import TerminalUI
 
 HELP_TEXT = """Commands:
@@ -50,9 +51,15 @@ class ChatState:
 
 
 class InteractiveChat:
-    def __init__(self, router: Router, store: LearningStore) -> None:
+    def __init__(
+        self,
+        router: Router,
+        store: LearningStore,
+        self_healer: SelfHealingManager | None = None,
+    ) -> None:
         self.router = router
         self.store = store
+        self.self_healer = self_healer
         self.ui = TerminalUI()
         self.state_for_toolbar: ChatState | None = None
         self.input = ChatInput(
@@ -282,7 +289,11 @@ class InteractiveChat:
 
         result = result_queue.get()
         if isinstance(result, Exception):
-            raise result
+            state.draft_prompt = prompt
+            recovered = self._attempt_self_heal(result, state, prompt)
+            if not recovered:
+                self.ui.print_error(f"internal error: {result}")
+            return
         response = result
         state.last_response = response
 
@@ -526,3 +537,22 @@ class InteractiveChat:
 
         state.draft_prompt = ""
         self._run_turn(edited, state)
+
+    def _attempt_self_heal(
+        self,
+        exc: Exception,
+        state: ChatState,
+        prompt: str,
+    ) -> bool:
+        if self.self_healer is None:
+            return False
+        return self.self_healer.attempt_recovery(
+            exc,
+            CrashContext(
+                command="chat",
+                workdir=os.getcwd(),
+                session_id=state.session.id,
+                last_prompt=prompt,
+            ),
+            ui=self.ui,
+        )

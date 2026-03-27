@@ -8,6 +8,7 @@ from codex_adv.chat import InteractiveChat
 from codex_adv.config import load_config
 from codex_adv.learning import LearningStore
 from codex_adv.router import Router
+from codex_adv.self_heal import CrashContext, SelfHealingManager
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +59,21 @@ def command_run(config_path: str | None, prompt_parts: list[str]) -> int:
     config = load_config(config_path)
     store = LearningStore(config.database.path)
     router = Router(config, store)
-    response = router.run(prompt)
+    self_healer = SelfHealingManager(config)
+    try:
+        response = router.run(prompt)
+    except Exception as exc:  # pragma: no cover
+        recovered = self_healer.attempt_recovery(
+            exc,
+            CrashContext(
+                command="run",
+                workdir=str(Path.cwd()),
+                last_prompt=prompt,
+            ),
+        )
+        if recovered:
+            return 0
+        raise
 
     print(response.output)
     print(
@@ -78,7 +93,7 @@ def command_chat(config_path: str | None, new_session: bool) -> int:
     config = load_config(config_path)
     store = LearningStore(config.database.path)
     router = Router(config, store)
-    chat = InteractiveChat(router, store)
+    chat = InteractiveChat(router, store, self_healer=SelfHealingManager(config))
     return chat.start(resume_latest=not new_session)
 
 
